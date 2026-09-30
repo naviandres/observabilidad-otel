@@ -1,0 +1,27 @@
+# === Python & Entornos Virtuales ===
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+
+# === IntelliJ / PyCharm ===
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# === Distribución y Build ===
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# === Cobertura y Testing ===
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
