@@ -1,0 +1,68 @@
+networks:
+  otel-network:
+    driver: bridge
+
+services:
+  otel-collector:
+    build:
+      context: ./deploy/collector
+      dockerfile: otelcol-contrib.dockerfile
+    container_name: otel-collector
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    environment:
+      - AWS_REGION=us-east-1
+    networks:
+      - otel-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=admin
+      - POSTGRES_DB=orders
+    ports:
+      - "5432:5432"
+    networks:
+      - otel-network
+
+  service-a:
+    build:
+      context: ./service-a
+      dockerfile: Dockerfile
+    container_name: service-a
+    ports:
+      - "8000:8000"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-a
+      - DATABASE_URL=postgresql+psycopg2://postgres:admin@postgres:5432/orders
+      - INVENTORY_SERVICE_URL=http://service-b:8001
+    depends_on:
+      - otel-collector
+      - postgres
+      - service-b
+    networks:
+      - otel-network
+
+  service-b:
+    build:
+      context: ./service-b
+      dockerfile: Dockerfile
+    container_name: service-b
+    ports:
+      - "8001:8001"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-b
+      - DATABASE_URL=postgresql+psycopg2://postgres:admin@postgres:5432/orders
+    depends_on:
+      - otel-collector
+      - postgres
+    networks:
+      - otel-network

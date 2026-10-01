@@ -1,3 +1,4 @@
+import os
 import uuid
 
 from fastapi import FastAPI, HTTPException
@@ -15,11 +16,12 @@ from app.database import engine
 from app.persistence import persist_order
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
+
 # ============================================================
 # OpenTelemetry
 # ============================================================
 
-tracer,meter, logger = configure_telemetry("service-a")
+tracer, meter, logger = configure_telemetry("service-a")
 
 # ============================================================
 # FastAPI
@@ -46,12 +48,17 @@ SQLAlchemyInstrumentor().instrument(
 # Service B
 # ============================================================
 
+INVENTORY_SERVICE_URL = os.getenv(
+    "INVENTORY_SERVICE_URL",
+    "http://service-b:8001"
+)
+
 inventory_client = InventoryClient(
-    "http://localhost:8001"
+    INVENTORY_SERVICE_URL
 )
 
 # ============================================================
-# POST /metric
+# GET /metrics
 # ============================================================
 @app.get("/metrics")
 def metrics_endpoint():
@@ -59,6 +66,7 @@ def metrics_endpoint():
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST
     )
+
 # ============================================================
 # POST /orders
 # ============================================================
