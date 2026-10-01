@@ -13,12 +13,13 @@ from app.service import InventoryClient
 from app.payment import authorize_payment
 from app.database import engine
 from app.persistence import persist_order
-
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
 # ============================================================
 # OpenTelemetry
 # ============================================================
 
-tracer, logger = configure_telemetry("service-a")
+tracer,meter, logger = configure_telemetry("service-a")
 
 # ============================================================
 # FastAPI
@@ -49,7 +50,15 @@ inventory_client = InventoryClient(
     "http://localhost:8001"
 )
 
-
+# ============================================================
+# POST /metric
+# ============================================================
+@app.get("/metrics")
+def metrics_endpoint():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 # ============================================================
 # POST /orders
 # ============================================================

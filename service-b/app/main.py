@@ -15,9 +15,10 @@ from opentelemetry.instrumentation.sqlalchemy import (
 from app.telemetry import configure_telemetry
 
 from app.database import engine
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
 
-
-tracer, logger = configure_telemetry(
+tracer, meter,logger = configure_telemetry(
     "service-b"
 )
 
@@ -34,8 +35,18 @@ FastAPIInstrumentor.instrument_app(
 SQLAlchemyInstrumentor().instrument(
     engine=engine
 )
-
-
+# ============================================================
+# POST /metrics
+# ============================================================
+@app.get("/metrics")
+def metrics_endpoint():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+# ============================================================
+# POST /inventory/reserve
+# ============================================================
 @app.post("/inventory/reserve")
 async def reserve_inventory(request: dict):
 

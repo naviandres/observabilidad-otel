@@ -6,6 +6,9 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
 #from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
@@ -49,6 +52,8 @@ def configure_telemetry(service_name: str):
         "deployment.environment": "development"
     })
 
+    # TRACES
+
     provider = TracerProvider(resource=resource)
 
     #exporter = OTLPSpanExporter(
@@ -62,6 +67,21 @@ def configure_telemetry(service_name: str):
     )
 
     trace.set_tracer_provider(provider)
+
+    # METRICS
+
+    prometheus_reader = PrometheusMetricReader()
+
+    meter_provider = MeterProvider(
+        resource=resource,
+        metric_readers=[
+            prometheus_reader
+        ]
+    )
+
+    metrics.set_meter_provider(
+        meter_provider
+    )
 
     # Logger
     logger = logging.getLogger(service_name)
@@ -81,4 +101,8 @@ def configure_telemetry(service_name: str):
 
         logger.addHandler(handler)
 
-    return trace.get_tracer(service_name), logger
+    meter = metrics.get_meter(
+        service_name
+    )
+
+    return trace.get_tracer(service_name),meter, logger
