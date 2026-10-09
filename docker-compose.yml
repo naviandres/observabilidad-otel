@@ -1,68 +1,87 @@
-networks:
-  otel-network:
-    driver: bridge
-
 services:
-  otel-collector:
-    build:
-      context: ./deploy/collector
-      dockerfile: otelcol-contrib.dockerfile
-    container_name: otel-collector
-    restart: unless-stopped
-    ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "8888:8888"
-      - "8889:8889"
-    environment:
-      - AWS_REGION=us-east-1
-    networks:
-      - otel-network
-
   postgres:
     image: postgres:15-alpine
-    container_name: postgres
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=admin
-      - POSTGRES_DB=orders
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orders
     ports:
       - "5432:5432"
-    networks:
-      - otel-network
+    volumes:
+      - ./init-scripts:/docker-entrypoint-initdb.d
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics exporter for collector
+      - "8889:8889"   # Prometheus exporter metrics
+    depends_on:
+      - jaeger
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686" # Jaeger UI
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/collector/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
 
   service-a:
-    build:
-      context: ./service-a
-      dockerfile: Dockerfile
-    container_name: service-a
+    build: ./service-a
     ports:
       - "8000:8000"
     environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/orders
+      - INVENTORY_SERVICE_URL=http://service-b:8001
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=service-a
-      - DATABASE_URL=postgresql+psycopg2://postgres:admin@postgres:5432/orders
-      - INVENTORY_SERVICE_URL=http://service-b:8001
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=service-a
     depends_on:
-      - otel-collector
-      - postgres
-      - service-b
-    networks:
-      - otel-network
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   service-b:
-    build:
-      context: ./service-b
-      dockerfile: Dockerfile
-    container_name: service-b
+    build: ./service-b
     ports:
       - "8001:8001"
     environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/inventory
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=service-b
-      - DATABASE_URL=postgresql+psycopg2://postgres:admin@postgres:5432/inventory
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=service-b
     depends_on:
-      - otel-collector
-      - postgres
-    networks:
-      - otel-network
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+volumes:
+  postgres_data:
