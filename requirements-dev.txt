@@ -1,0 +1,5 @@
+# Development + test dependencies for the offline test suite (PLAN 1.E).
+# Runtime dependencies come from service-a (service-b mirrors them).
+-r service-a/requirements.txt
+
+pytest==8.4.2
