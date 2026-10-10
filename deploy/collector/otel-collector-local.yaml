@@ -1,0 +1,131 @@
+# OTel Collector — local / develop mode (PLAN §7: OTLP -> Prometheus + debug).
+#
+# Mounted by both local compose files (docker-compose.yml, deploy/docker-compose.yml)
+# in place of the old root-level otel-collector-config.yaml. This is the config
+# with the processors not present in ADOT, so it is validated with the contrib
+# binary (PLAN §2.C/§5):
+#
+#   docker run --rm -v "${PWD}/deploy/collector:/cfg" \
+#     otel/opentelemetry-collector-contrib:0.162.0 \
+#     validate --config=/cfg/otel-collector-local.yaml
+#
+# Traces also keep flowing to Jaeger so the local waterfall (Fase 3) still works;
+# metrics are exposed on :8889 for Prometheus (deploy/collector/prometheus.yml).
+
+receivers:
+  # PLAN §2.A: gRPC :4317 + HTTP :4318.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  # PLAN §2.A: scrape the collector's own telemetry on 127.0.0.1:8888 so the
+  # self-metrics are re-exported on :8889 and reachable by Prometheus.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+  # PLAN §2.A: host metrics every 30 s (stands in for Container Insights here).
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      processes:
+
+processors:
+  # PLAN §2.A: memory_limiter first.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  # PLAN §2.A: detect env/system, complete but never overwrite app attributes.
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+  # PLAN §2.A: normalise deployment.environment and cloud.platform on all signals.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+      - key: cloud.platform
+        value: local
+        action: upsert
+  # PLAN §2.A: rename log.severity -> severity_text, guarantee a string body and
+  # add aws.log.group.names as a resource attribute (contrib-only processor).
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, attributes["log.severity"]) where attributes["log.severity"] != nil
+          - delete_key(attributes, "log.severity") where attributes["log.severity"] != nil
+          - set(body, Concat([body], "")) where IsString(body) == false
+          - set(resource.attributes["aws.log.group.names"], "otel-labs-local") where resource.attributes["aws.log.group.names"] == nil
+  # PLAN §2.A: strip PII (card*, email, authorization).
+  attributes/redact:
+    actions:
+      - key: card.number
+        action: delete
+      - key: card.cvv
+        action: delete
+      - key: email
+        action: delete
+      - key: authorization
+        action: delete
+  # PLAN §2.A: batch last, timeout 5s / send_batch_size 1024.
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 5s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 127.0.0.1:1777
+
+exporters:
+  # Local Jaeger (all-in-one) for the trace waterfall.
+  otlp/jaeger:
+    endpoint: "jaeger:4317"
+    tls:
+      insecure: true
+  # Prometheus exposition for the local stack (scraped on :8889).
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otel
+  # PLAN §7: debug sink for the local/develop collector.
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, pprof]
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, transform/logs, attributes/redact, batch]
+      exporters: [debug]
