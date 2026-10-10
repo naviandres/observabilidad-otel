@@ -30,7 +30,8 @@ services:
     image: otel/opentelemetry-collector-contrib:0.162.0
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
-      - ../otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      # Local/develop config (PLAN §7); validated with the contrib binary.
+      - ./collector/otel-collector-local.yaml:/etc/otel-collector-config.yaml:ro
     ports:
       - "4317:4317"   # OTLP gRPC receiver
       - "4318:4318"   # OTLP HTTP receiver

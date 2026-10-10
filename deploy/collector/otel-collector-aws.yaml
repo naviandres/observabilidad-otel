@@ -1,40 +1,101 @@
+# OTel Collector — AWS / ADOT mode (ECS-on-EC2, PLAN §2.A/§2.B).
+#
+# Baked into the collector image by deploy/collector/otelcol-contrib.dockerfile
+# (COPY otel-collector-aws.yaml /etc/otelcol/config.yaml) so the configuration
+# is immutable and versioned next to the binary (PLAN §2.B).
+#
+# Validation (PLAN §2.C): the ADOT binary has NO `validate` subcommand — it
+# reports config errors as a fast, non-zero exit on startup. The CI check is:
+#
+#   docker run --rm -e AWS_REGION=us-east-1 \
+#     -e GRAFANA_PROM_URL=https://prometheus.example.com/api/prom \
+#     -e GRAFANA_TEMPO_ENDPOINT=https://tempo.example.com \
+#     -e GRAFANA_LOKI_ENDPOINT=https://loki.example.com/otlp \
+#     -v "${PWD}/deploy/collector:/cfg" \
+#     public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0 \
+#     --config=file:/cfg/otel-collector-aws.yaml
+#   # OK == the collector starts (no config/initialization error)
+#
+# R-09 deviations (ADOT binary does not ship these components; see PLAN R-09):
+#   * hostmetrics receiver  -> ADOT lacks it; CPU/mem come from the
+#     `cloudwatch-agent` sidecar of the same ECS task (R-16: one or the other,
+#     never both).
+#   * transform/logs        -> ADOT lacks the `transform` processor; the same
+#     rename is done with the ADOT-supported `attributes/logs` processor and
+#     per-service CloudWatch log groups use the exporter `{ServiceName}` macro.
+# The full literal chain (hostmetrics + transform/logs) lives in the local
+# config, validated with the contrib binary (deploy/collector/otel-collector-local.yaml).
+
 receivers:
+  # PLAN §2.A: gRPC :4317 + HTTP :4318.
   otlp:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  # PLAN §2.A: scrape the collector's own telemetry on 127.0.0.1:8888.
+  # (The collector never calls the CloudWatch metrics API — ADR-005.)
   prometheus:
     config:
       scrape_configs:
-        - job_name: 'otel-collector'
+        - job_name: otel-collector
           scrape_interval: 15s
           static_configs:
-            - targets: ['127.0.0.1:8888']
+            - targets: ["127.0.0.1:8888"]
 
 processors:
+  # PLAN §2.A/R-08: first in the chain, calibrated to stay under ~350 MB on a
+  # 2 GiB t3.small alongside OS + dockerd + 2 services + Postgres.
   memory_limiter:
     check_interval: 1s
     limit_percentage: 75
     spike_limit_percentage: 20
 
+  # PLAN §2.A/§2.B: detect env/ECS/system, complete but never overwrite what
+  # the app already set (override: false -> service.name is preserved).
   resourcedetection:
-    detectors: [env, system]
+    detectors: [env, ecs, system]
     timeout: 2s
     override: false
 
+  # PLAN §2.A: normalise deployment.environment and cloud.platform on every
+  # signal so the three pillars can be filtered the same way.
   resource:
     attributes:
       - key: deployment.environment
-        value: "lab"
+        value: lab
+        action: upsert
+      - key: cloud.platform
+        value: aws_ecs
         action: upsert
 
-  attributes/redact:
+  # PLAN §2.A `transform/logs` equivalent (R-09): rename log.severity ->
+  # severity_text. Per-service CloudWatch log groups are produced by the
+  # awscloudwatchlogs `{ServiceName}` macro on log_group_name (below).
+  attributes/logs:
     actions:
-      - key: credit_card
+      - key: severity_text
+        from_attribute: log.severity
+        action: insert
+      - key: log.severity
         action: delete
 
+  # PLAN §2.A: strip PII (card*, email, authorization) — cost + security.
+  attributes/redact:
+    actions:
+      - key: card.number
+        action: delete
+      - key: card.cvv
+        action: delete
+      - key: email
+        action: delete
+      - key: authorization
+        action: delete
+
+  # PLAN §2.A/§3.4 C1/§3.6: whitelist of exactly 4 counters before EMF, so
+  # CloudWatch stays within the 10 free custom metrics. Histograms never reach
+  # EMF (the dashboard reads Prometheus).
   filter/cloudwatch-metrics:
     metrics:
       include:
@@ -45,46 +106,81 @@ processors:
           - payment_authorization_failures_total
           - db_query_errors_total
 
+  # PLAN §2.A: last in the chain, timeout 5s / send_batch_size 1024.
   batch:
-    send_batch_size: 512
-    send_batch_max_size: 1024
+    send_batch_size: 1024
+    send_batch_max_size: 2048
     timeout: 5s
 
+extensions:
+  # PLAN §2.A: health_check :13133 + pprof 127.0.0.1:1777 (never exposed).
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 127.0.0.1:1777
+
 exporters:
+  # 1/7 X-Ray (traces). CONDITIONAL: disabled during the benchmark by setting
+  # OTEL_TRACES_XRAY=false (PLAN §2.A/§3.4 C2) -> 6 destinations.
   awsxray:
-    region: us-east-1
-
-  awscloudwatchlogs:
-    log_group_name: "/otel/labs/ecs-cluster"
-    log_stream_name: "tasks"
-    region: us-east-1
-
+    region: ${env:AWS_REGION}
+  # 2/7 CloudWatch EMF (metrics): only the 4 whitelisted counters, namespace OtelLab.
   awsemf:
-    region: us-east-1
+    region: ${env:AWS_REGION}
     namespace: OtelLab
-
+  # 3/7 CloudWatch Logs. Per-service log group via the {ServiceName} macro.
+  awscloudwatchlogs:
+    region: ${env:AWS_REGION}
+    log_group_name: "/otel/labs/ecs-cluster/{ServiceName}"
+    log_stream_name: "{TaskId}"
+  # 4/7 Prometheus local (:8889/metrics, scrapeable via the SSM tunnel).
   prometheus:
     endpoint: "0.0.0.0:8889"
-    namespace: "otel"
+    namespace: otel
+  # 5/7 Grafana Cloud Prometheus (fallback: a local Prometheus remote-write).
+  prometheusremotewrite:
+    endpoint: ${env:GRAFANA_PROM_URL}
+    headers:
+      Authorization: "Basic ${env:GRAFANA_PROM_AUTH}"
+  # 6/7 Grafana Cloud Tempo.
+  otlphttp/tempo:
+    endpoint: ${env:GRAFANA_TEMPO_ENDPOINT}
+    headers:
+      authorization: "Basic ${env:GRAFANA_TEMPO_AUTH}"
+  # 7/7 Grafana Cloud Loki.
+  otlphttp/loki:
+    endpoint: ${env:GRAFANA_LOKI_ENDPOINT}
+    headers:
+      authorization: "Basic ${env:GRAFANA_LOKI_AUTH}"
 
 service:
+  extensions: [health_check, pprof]
+  # PLAN §2.A: self-telemetry on :8888, level detailed (feeds the prometheus
+  # receiver above -> panel 6). AWS cost $0 (ADR-005).
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
   pipelines:
+    # 4 pipelines (PLAN §15).
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection, resource, batch]
-      exporters: [awsxray]
-    metrics/emf:
+      exporters: [awsxray, otlphttp/tempo]
+    metrics/cloudwatch:
       receivers: [otlp]
-      processors: [memory_limiter, filter/cloudwatch-metrics, batch]
+      processors: [memory_limiter, resourcedetection, resource, filter/cloudwatch-metrics, batch]
       exporters: [awsemf]
     metrics/prometheus:
       receivers: [otlp, prometheus]
-      processors: [memory_limiter, batch]
-      exporters: [prometheus]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [prometheus, prometheusremotewrite]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/redact, batch]
-      exporters: [awscloudwatchlogs]
-  telemetry:
-    metrics:
-      address: "127.0.0.1:8888"
+      processors: [memory_limiter, resourcedetection, resource, attributes/logs, attributes/redact, batch]
+      exporters: [awscloudwatchlogs, otlphttp/loki]
