@@ -1,11 +1,10 @@
-# Full local development stack (all-in-one) — the harness smoke-tests this file.
+# Core application stack (PLAN §1.A): postgres + OTel Collector + both services.
 #
-#   docker compose up --build -d          # from src/observabilidad-otel
+#   docker compose -f deploy/docker-compose.yml up -d
 #
-# The split layout from PLAN §1.A is deploy/docker-compose.yml (core) +
-# deploy/docker-compose.observability.yml (jaeger/prometheus/grafana). This file
-# keeps the two stacks combined so `docker compose up` at the repo root still
-# brings up everything.
+# Pair it with deploy/docker-compose.observability.yml (Jaeger + Prometheus +
+# Grafana). Both files live in deploy/, so they share the same Compose project
+# and default network and can reach each other by service name.
 #
 # Image tags are pinned on purpose: never `:latest` (docs/conventions.md, C3).
 services:
@@ -19,7 +18,7 @@ services:
       - "5432:5432"
     volumes:
       # Fresh volume => schema + inventory seed run automatically (no manual step).
-      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+      - ../init-scripts:/docker-entrypoint-initdb.d:ro
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -31,44 +30,15 @@ services:
     image: otel/opentelemetry-collector-contrib:0.162.0
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
-      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - ../otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
       - "4317:4317"   # OTLP gRPC receiver
       - "4318:4318"   # OTLP HTTP receiver
       - "8888:8888"   # Collector self-telemetry
       - "8889:8889"   # Prometheus exporter (application metrics)
-    depends_on:
-      - jaeger
-      - prometheus
-
-  jaeger:
-    image: jaegertracing/all-in-one:1.76.0
-    ports:
-      - "16686:16686" # Jaeger UI
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-
-  prometheus:
-    image: prom/prometheus:v2.53.0
-    volumes:
-      - ./deploy/collector/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports:
-      - "9090:9090"
-
-  grafana:
-    image: grafana/grafana:11.1.0
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      # Provisioned by code, never configured by hand (PLAN §3.A).
-      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./dashboards:/var/lib/grafana/dashboards:ro
 
   service-a:
-    build: ./service-a
+    build: ../service-a
     ports:
       - "8000:8000"
     environment:
@@ -84,7 +54,7 @@ services:
         condition: service_started
 
   service-b:
-    build: ./service-b
+    build: ../service-b
     ports:
       - "8001:8001"
     environment:

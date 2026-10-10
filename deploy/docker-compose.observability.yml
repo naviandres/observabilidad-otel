@@ -1,0 +1,35 @@
+# Local observability backends (PLAN §1.A / docs/deployment.md, "Modo local").
+#
+#   docker compose -f deploy/docker-compose.observability.yml up -d
+#
+# Both files live in deploy/, so they share the same Compose project and default
+# network: Prometheus scrapes otel-collector:8889 and Grafana reaches
+# prometheus:9090 / jaeger:16686 by service name.
+#
+# Image tags are pinned on purpose: never `:latest` (docs/conventions.md, C3).
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    ports:
+      - "16686:16686" # Jaeger UI
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./collector/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      # Provisioned by code, never configured by hand (PLAN §3.A).
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../dashboards:/var/lib/grafana/dashboards:ro

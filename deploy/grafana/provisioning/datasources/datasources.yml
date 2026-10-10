@@ -1,0 +1,20 @@
+# Grafana datasources provisioned by code (never by hand, PLAN §3.A).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  # Jaeger datasource ships with Grafana OSS; if the plugin is missing in a
+  # given Grafana build, provisioning logs a warning and the rest still loads.
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false

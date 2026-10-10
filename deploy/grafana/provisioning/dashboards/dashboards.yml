@@ -1,0 +1,15 @@
+# Grafana dashboard provider provisioned by code (PLAN §3.A). It loads every
+# JSON found under /var/lib/grafana/dashboards (mounted from ../dashboards).
+apiVersion: 1
+
+providers:
+  - name: lab_obs
+    orgId: 1
+    folder: lab_obs
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
