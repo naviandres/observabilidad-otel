@@ -6,6 +6,8 @@ venv/
 .venv/
 env/
 .env
+.env.*
+!.env.example
 
 # === IntelliJ / PyCharm ===
 .idea/
@@ -25,3 +27,13 @@ dist/
 .coverage
 htmlcov/
 .mypy_cache/
+
+# IaC/evidencia hygiene (runbook D "NO OLVIDAR", 2026-10-11)
+*.pem
+credentials
+plan.json
+tfplan*
+docs/evidence/*.txt
+# Excepción: 00-credentials.txt lleva identidades/tokens ENMASCARADOS y sí se versiona
+# (runbook A.3/B.0). El patrón *.txt de arriba la excluiría; esta línea la re-incluye.
+!docs/evidence/00-credentials.txt
