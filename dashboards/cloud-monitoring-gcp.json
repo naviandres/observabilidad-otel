@@ -1,0 +1,174 @@
+{
+  "displayName": "OTel Lab — SLIs GCP (Managed Prometheus) — 6 paneles PLAN §3.C",
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 12,
+        "height": 2,
+        "widget": {
+          "title": "OTel Lab dual-cloud · pata GCP (proyecto otel-lab-obs-2610)",
+          "text": {
+            "content": "Entregable **#22** — equivalente Cloud Monitoring de los 6 paneles del PLAN §3.C. Fuentes: **Managed Prometheus** (`prometheus.googleapis.com/*`) exportado por el collector GCP-distro (#21). Ningún panel consulta trazas/logs ni métricas nativas de AWS: la salud del Collector vive en GMP (decisión C5). **Limitaciones documentadas (decisión de coste C1 del PLAN §2.A/§3.4, no fallos):** (1) p99/p95 aproximados por media `rate(_sum)/rate(_count)` — los cuantiles reales por buckets quedan en el dashboard Prometheus/Grafana (#7); (2) panel 4: la serie de *duración* DB (`db_client_operation_duration_milliseconds`) no llega aún a GMP — el instrumentador SQLAlchemy 0.66b1 solo emite `db_client_connections_usage` (query de duración preparada para #23/#24); (3) panel 6: `otelcol_exporter_send_failed_spans_total` con valor 0 no se exporta (panel vacío = saludable); (4) panel 5: usa cAdvisor/GMP (`container_cpu_usage_seconds_total`); la alternativa hostmetrics del collector (`prometheus.googleapis.com/system_cpu_time_seconds_total/counter`, label state) no se grafica para no duplicar fuente. Queries verificadas en vivo contra los datos del smoke #21b (2026-10-11). Layout: fila 1 = SLIs de tráfico (rate/error), fila 2 = latencias (e2e/DB), fila 3 = overhead (CPU/Collector).",
+            "format": "MARKDOWN"
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 2,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "1 · Request rate (rps) por servicio — SLI 1 · prometheus.googleapis.com/http_server_duration_milliseconds/histogram",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (job) (rate(http_server_duration_milliseconds_count[5m]))"
+                },
+                "legendTemplate": "{{job}}"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 2,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "2 · Error rate (ratio 5xx) — SLI 2 · umbral SLO 0,5% · prometheus.googleapis.com/http_server_duration_milliseconds/histogram",
+          "xyChart": {
+            "thresholds": [
+              {
+                "label": "SLO 5xx ≤ 0,5%",
+                "value": 0.005
+              }
+            ],
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "(sum(rate(http_server_duration_milliseconds_count{http_status_code=~\"5..\"}[5m])) or vector(0)) / sum(rate(http_server_duration_milliseconds_count[5m]))"
+                },
+                "legendTemplate": "ratio 5xx"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 6,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "3 · Latencia e2e (avg ms, proxy p99) — SLI 3 · prometheus.googleapis.com/http_server_duration_milliseconds/histogram",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (job) (rate(http_server_duration_milliseconds_sum[5m])) / sum by (job) (rate(http_server_duration_milliseconds_count[5m]))"
+                },
+                "legendTemplate": "{{job}} avg ms"
+              }
+            ],
+            "yAxis": {
+              "label": "ms"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 6,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "4 · Latencia DB (avg ms, proxy p95) + conexiones used — SLI 4 · prometheus.googleapis.com/db_client_connections_usage/gauge",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (job) (rate(db_client_operation_duration_milliseconds_sum[5m])) / sum by (job) (rate(db_client_operation_duration_milliseconds_count[5m]))"
+                },
+                "legendTemplate": "{{job}} db avg ms"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "db_client_connections_usage{state=\"used\"}"
+                },
+                "legendTemplate": "{{job}} conns used"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 10,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "5 · CPU pods del lab y nodo (cores) — overhead · prometheus.googleapis.com/container_cpu_usage_seconds_total/counter",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"otel-lab\", container!=\"\"}[5m]))"
+                },
+                "legendTemplate": "pod {{pod}}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (node) (rate(container_cpu_usage_seconds_total{id=\"/\", cpu=\"total\"}[5m]))"
+                },
+                "legendTemplate": "nodo {{node}}"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 10,
+        "width": 6,
+        "height": 4,
+        "widget": {
+          "title": "6 · Errores del OTel Collector — overhead · prometheus.googleapis.com/otelcol_exporter_send_failed_spans_total/counter",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (exporter) (rate(otelcol_exporter_send_failed_spans_total[5m]))"
+                },
+                "legendTemplate": "{{exporter}} failed spans/s"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points_total[5m]))"
+                },
+                "legendTemplate": "{{exporter}} failed points/s"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (receiver) (rate(otelcol_receiver_refused_spans_total[5m]))"
+                },
+                "legendTemplate": "{{receiver}} refused spans/s"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "otelcol_exporter_queue_size"
+                },
+                "legendTemplate": "{{exporter}}/{{data_type}} queue"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}
