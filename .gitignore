@@ -25,3 +25,8 @@ dist/
 .coverage
 htmlcov/
 .mypy_cache/
+# === Terraform ===
+.terraform/
+*.tfplan
+tfplan.bin
+tfplan.json
