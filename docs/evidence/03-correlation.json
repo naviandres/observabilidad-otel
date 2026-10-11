@@ -27,49 +27,49 @@
       "id": 3,
       "nombre": "X-Ray: segmentos de service-a y service-b con parent_id correcto",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 4,
       "nombre": "X-Ray: atributo db.system=postgresql en segmento de service-b",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 5,
       "nombre": "CloudWatch Logs: ≥1 entrada con trace_id por servicio",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 6,
       "nombre": "CloudWatch Metrics: orders_created_total incrementado en la ventana",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 7,
       "nombre": "Consistencia de resource entre traza, log y métrica por nube",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 8,
       "nombre": "Prometheus: exemplars con trace_id de traza existente",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {
       "id": 9,
       "nombre": "Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus)",
       "estado": "SKIP",
-      "razon": "la pata AWS de la correlacion (despliegue AWS aun no disponible)",
+      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
       "detalles": {}
     },
     {

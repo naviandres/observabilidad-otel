@@ -106,7 +106,7 @@ ASSERTION_CATALOG: list[tuple[int, str, bool]] = [
 ]
 
 AWS_SKIP_REASON = "despliegue AWS no disponible (cuenta en sandbox)"
-AWS_CORRELATION_SKIP_REASON = "la pata AWS de la correlacion (despliegue AWS aun no disponible)"
+AWS_CORRELATION_SKIP_REASON = "la verificación del lado AWS (despliegue AWS aun no disponible)"
 GCP_SKIP_REASON = "GCP no incluido (ejecutar con --include-gcp)"
 
 

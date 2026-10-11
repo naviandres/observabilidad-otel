@@ -119,7 +119,7 @@ def test_local_mode_exits_zero_with_expected_skips(vc, monkeypatch, tmp_path):
     for assertion_id in range(3, 10):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
-        assert row["razon"] == "la pata AWS de la correlacion (despliegue AWS aun no disponible)"
+        assert row["razon"] == "la verificación del lado AWS (despliegue AWS aun no disponible)"
     for assertion_id in (10, 11, 12):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
