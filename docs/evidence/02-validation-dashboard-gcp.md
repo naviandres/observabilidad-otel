@@ -2,7 +2,7 @@
 
 > **Fecha:** 2026-10-11 · **Proyecto:** `otel-lab-obs-2610` (número `797970839119`) ·
 > **Operador CLI:** `luismiguelossaarias05@gmail.com` (gcloud SDK 580.0.0, ADC OK) ·
-> **Rama del entregable:** `feat/22-fase3-dashboard-cloud-monitoring-gcp` (HEAD `8e12f0c`).
+> **Base de la prueba:** commit `8e12f0c` del entregable (dashboard Cloud Monitoring + WI evidencia).
 > **Alcance:** evidencia de la validación humana, tras la revisión, del dashboard
 > `8ceea108-ca30-4d79-b18a-f4610bfc8f71`: se valida **en vivo** con carga de
 > tráfico real, inyección de fallo y auditoría de series en Google Managed Prometheus (GMP).
