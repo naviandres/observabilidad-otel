@@ -1,0 +1,76 @@
+# CI: terraform plan de la pata GCP + gate de coste (PLAN §5.A "Estado de
+# apply": `terraform plan` en cada PR + guard_cost.py; el APPLY solo ocurre
+# desde main con aprobacion manual — nunca aqui).
+#
+# init con -backend=false: el state vive en GCS y en los PRs no se toca
+# (tampoco se necesita: el plan de un PR es una revision de diff, no una
+# lectura de estado real). Si el repo define el secret GCP_ADC_JSON (ADC de
+# usuario o SA con quota_project_id=otel-lab-obs-2610), el plan refresca
+# contra el estado; sin secret, el job falla con instruccion clara.
+
+name: terraform-plan-gcp
+
+on:
+  pull_request:
+    paths:
+      - "infra/gcp/**"
+      - ".github/workflows/terraform-plan-gcp.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tf-plan-gcp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      TF_VAR_gcp_project: otel-lab-obs-2610
+      TF_VAR_gcp_region: us-central1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ADC from repo secret
+        run: |
+          if [ -z "${{ secrets.GCP_ADC_JSON }}" ]; then
+            echo "::error::Falta el secret GCP_ADC_JSON (ADC con quota project \
+             otel-lab-obs-2610). Ver infra/README.md."
+            exit 1
+          fi
+          echo "${{ secrets.GCP_ADC_JSON }}" > "$RUNNER_TEMP/adc.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/adc.json" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: terraform init (sin backend)
+        working-directory: infra/gcp
+        run: terraform init -backend=false -input=false
+
+      - name: terraform fmt -check
+        working-directory: infra/gcp
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate
+        working-directory: infra/gcp
+        run: terraform validate
+
+      - name: terraform plan (lab, cluster en reposo)
+        working-directory: infra/gcp
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: guard_cost (lista negra PLAN §3.2)
+        working-directory: infra/gcp
+        run: terraform show -json tfplan.bin | python3 ../../scripts/guard_cost.py --provider google
+
+      - name: subir JSON del plan como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-gcp-json
+          path: infra/gcp/tfplan.bin
+          if-no-files-found: ignore
