@@ -7,6 +7,6 @@ metadata:
 data:
   # Fuente de verdad: deploy/collector/otel-collector-gcp.yaml (validada con el
   # binario contrib, PLAN §2.C). El Makefile `deploy-gcp` la sincroniza a
-  # files/ antes del helm; el test del harness exige que ambos bytes coincidan.
+  # files/ antes del helm; la suite de verificacion del laboratorio exige que ambos bytes coincidan.
   otel-collector-gcp.yaml: |
 {{ .Files.Get "files/otel-collector-gcp.yaml" | indent 4 }}

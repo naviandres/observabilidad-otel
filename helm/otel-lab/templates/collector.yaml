@@ -22,7 +22,7 @@ spec:
         # Workload Identity: la anotacion iam.gke.io/gcp-service-account NO va aqui.
         # GKE WI lee la anotacion del ServiceAccount (templates/serviceaccount.yaml),
         # no del pod template. El binding workloadIdentityUser (SA GCP <- KSA) se hace
-        # fuera del chart (Makefile gcp-start, #21b).
+        # fuera del chart (Makefile gcp-start).
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- include "otel-lab.spotPlacement" . | nindent 6 }}
@@ -73,7 +73,7 @@ spec:
             - name: config
               mountPath: /etc/otel
               readOnly: true
-            # filelog (#21b): stdout de los pods del nodo -> pipeline de logs.
+            # filelog: stdout de los pods del nodo -> pipeline de logs.
             # Cluster single-node: el collector ve los logs de service-a/b.
             # readOnly: el receiver solo lee; los offsets no se persisten
             # (start_at: end hace el checkpoint irrelevante).

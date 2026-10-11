@@ -9,6 +9,7 @@ import os
 
 from fastapi import FastAPI
 from fastapi.responses import Response
+from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
@@ -67,6 +68,24 @@ def metrics_endpoint():
 # ============================================================
 
 
+def _active_trace_id() -> str | None:
+    """Return the W3C trace id (32 lowercase hex) of the active span context.
+
+    Read from the OpenTelemetry SDK context — the application never touches
+    ``trace_id`` itself (conventions §Observabilidad). ``None`` when no valid
+    span context is active (e.g. ``OTEL_ENABLED=false``), so no misleading
+    all-zero header is emitted.
+    """
+    span_context = trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return None
+    return format(span_context.trace_id, "032x")
+
+
 @app.post("/orders")
-async def create_order(request: CreateOrderRequest):
+async def create_order(request: CreateOrderRequest, response: Response):
+    trace_id = _active_trace_id()
+    if trace_id is not None:
+        # PLAN §3.A assertion 2: edge-to-edge W3C trace id in the response.
+        response.headers["x-trace-id"] = trace_id
     return await process_order(request, inventory_client, engine=engine)

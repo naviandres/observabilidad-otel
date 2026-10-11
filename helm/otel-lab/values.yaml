@@ -24,7 +24,7 @@ preStopSleepSeconds: 5
 
 serviceAccount:
   # SA de Kubernetes del Collector, enlazada al SA de GCP via Workload
-  # Identity (binding hecho fuera del chart — ver docs/deployment.md #21b).
+  # Identity (binding hecho fuera del chart — ver docs/deployment.md).
   name: otel-lab-collector
 
 secrets:
@@ -33,17 +33,17 @@ secrets:
     providerClass: otel-lab-pg-password
     mountPath: /run/secrets/pg-password
     fileName: pg-password
-    # Nombre del driver CSI segun instalacion (feature #21b):
+    # Nombre del driver CSI segun instalacion:
     #   add-on GKE --enable-secret-manager -> secrets-store-gke.csi.k8s.io
     #   driver comunitario por Helm        -> secrets-store.csi.k8s.io
-    # El cluster del lab usa el add-on de GKE (21b), por eso el valor gke.
+    # El cluster del lab usa el add-on de GKE, por eso el valor gke.
     csiDriver: secrets-store-gke.csi.k8s.io
     # Nombre del provider dentro del SecretProviderClass (mismo eje driver/comunidad):
     #   add-on GKE -> gke (el ds provider-gke fija PROVIDER_NAME=gke y registra gke.sock
     #   en /etc/kubernetes/secrets-store-csi-providers; USER_AGENT es solo el user-agent)
     #   provider-gcp comunitario -> gcp-secret-manager
     providerName: gke
-    # Requiere en el cluster (feature #21b): driver + provider-gcp instalados
+    # Requiere en el cluster: driver + provider-gcp instalados
     # (aqui via add-on --enable-secret-manager). Sin driver, los pods quedan
     # en ContainerCreating.
 

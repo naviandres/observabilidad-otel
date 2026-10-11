@@ -1,12 +1,12 @@
-# 01 — Workload Identity binding (evidencia dura heredada de #21, tomada en #22)
+# 01 — Workload Identity binding (evidencia dura del despliegue GKE, tomada en la validación del dashboard)
 
 > **Fecha de auditoría:** 2026-10-11 · **Proyecto:** `otel-lab-obs-2610` (número `797970839119`) ·
 > **Operador CLI:** `luismiguelossaarias05@gmail.com` (gcloud SDK 580.0.0, ADC OK).
 > **Alcance:** evidencia dura del binding Workload Identity que habilita la autenticación de los
-> pods del lab (KSA → GCP SA) sin llaves de servicio. Heredada de #21 (PLAN §2.B-GCP): el deploy
+> pods del lab (KSA → GCP SA) sin llaves de servicio. Heredada del despliegue GKE (PLAN §2.B-GCP): el deploy
 > del smoke funcionó con exporters autenticados (binding ok *de facto*), pero quedaba pendiente
-> la captura del `get-iam-policy` como evidencia dura (nota de `progress/impl_21b_gke_deploy.md`,
-> línea "WI binding del KSA … re-verificar con get-iam-policy en #22"). Formato tipo
+> la captura del `get-iam-policy` como evidencia dura (anotado en la sesión del despliegue:
+> "WI binding del KSA … re-verificar con get-iam-policy al validar el dashboard"). Formato tipo
 > `00-free-tier-baseline-gcp.md`: volcado CLI + fecha, sin capturas.
 
 ## 1. Volcado CLI
@@ -32,11 +32,12 @@ version: 1
 
 ## 2. Lectura
 
-- El GCP SA **`otel-lab-deploy@otel-lab-obs-2610.iam.gserviceaccount.com`** (creado en #20 con
+- El GCP SA **`otel-lab-deploy@otel-lab-obs-2610.iam.gserviceaccount.com`** (creado al preparar el
+  proyecto GCP con
   6 roles least-privilege) tiene el rol `roles/iam.workloadIdentityUser` concedido a **dos KSA
   del namespace `otel-lab`**:
   - `otel-lab/otel-lab-collector` — el Collector GCP-distro (exporters `googlecloud` +
-    `googlemanagedprometheus` autenticados vía WI; verificado en el smoke #21:
+    `googlemanagedprometheus` autenticados vía WI; verificado en el smoke del despliegue GKE:
     `otelcol_exporter_sent_spans{googlecloud}=262`, `send_failed_spans=0`).
   - `otel-lab/default` — el KSA default del namespace (los pods de servicio corren con él;
     en el diseño actual las apps **no** llaman a APIs de GCP directamente — hablan OTLP con el
@@ -48,9 +49,9 @@ version: 1
 ## 3. Estado del cluster y vigencia
 
 - El cluster `otel-lab-std` **ya fue teardown** (~14:16Z 2026-10-11, DoD de coste §3.5 del PLAN:
-  no dejar cómputo fuera de sesión; coste de sesión #21 ≈ $1.04 + spot).
+  no dejar cómputo fuera de sesión; coste de la sesión del despliegue GKE ≈ $1.04 + spot).
 - **El binding IAM sobrevive al cluster**: es un recurso del proyecto, no del cluster. Al
-  redesplegar GKE en #23/#24 (o `make gcp-start`), la parte que hay que re-verificar es la
+  redesplegar GKE en las siguientes sesiones del cluster (o `make gcp-start`), la parte que hay que re-verificar es la
   **anotación del KSA sobre el cluster nuevo** (`kubectl get sa otel-lab-collector -n otel-lab
   -o jsonpath='{.metadata.annotations.iam\.gke\.io/gcp-service-account}'`), no este binding.
-- Zero coste: `gcloud iam` y las políticas WI no se cobran (lista blanca PLAN §3.3 #13).
+- Zero coste: `gcloud iam` y las políticas WI no se cobran (lista blanca del PLAN §3.3, riesgo R-13).

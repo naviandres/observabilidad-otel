@@ -1,6 +1,6 @@
 # OTel Collector — GCP / contrib mode (GKE Standard, PLAN §2.A-GCP/§2.B-GCP).
 #
-# Mounted on the GKE collector pod via Helm ConfigMap (helm/otel-lab, feature #21);
+# Mounted on the GKE collector pod via the Helm chart ConfigMap (helm/otel-lab);
 # the image is otel/opentelemetry-collector-contrib:0.162.0 — NOT ADOT (PLAN §2.C:
 # each cloud config is validated with the binary of its own image).
 #
@@ -17,11 +17,11 @@
 # pipeline still exists but sends nothing to Cloud Trace (≈$0 ingest); the
 # `nop` exporter below is what the env resolves to in that mode.
 #
-# Deferred exporters (decision 2026-10-11, progress/current.md — Grafana Cloud
-# hub deferred, section C closed local-only; Jaeger-on-GCP is feature #25):
+# Deferred exporters (decision 2026-10-11: Grafana Cloud
+# hub deferred, section C closed local-only; Jaeger-on-GCP still pending):
 #   otlphttp/tempo / otlphttp/loki -> reactivate here when the Grafana Cloud
 #   hub decision is revisited (same blocks as otel-collector-aws.yaml L145-154).
-#   otlphttp/jaeger-gcp -> added by feature #25 when Jaeger ships in the cluster.
+#   otlphttp/jaeger-gcp -> added when Jaeger ships in the cluster.
 
 receivers:
   # PLAN §2.A: gRPC :4317 + HTTP :4318.
@@ -50,9 +50,10 @@ receivers:
       cpu:
       memory:
       processes:
-  # #21b: fuente del pipeline de logs. La app emite structlog JSON a stdout
+  # Fuente del pipeline de logs. La app emite structlog JSON a stdout
   # (el SDK no exporta logs por OTLP; PLAN §1 L454 preveia
-  # opentelemetry-instrumentation-logging y no se cableo en #2). El collector
+  # opentelemetry-instrumentation-logging y no se cableo durante la
+  # instrumentacion). El collector
   # lee el stdout de los pods del NODO (cluster single-node) y lo sube a Cloud
   # Logging con el trace_id normalizado en logging.googleapis.com/trace
   # (checklist §2.C). log_name dedicado (otel-app-logs) para NO pisar el
@@ -124,7 +125,7 @@ processors:
         statements:
           - set(severity_text, attributes["log.severity"]) where attributes["log.severity"] != nil
           - delete_key(attributes, "log.severity") where attributes["log.severity"] != nil
-          # #21b filelog path: structlog JSON fields live in the body map.
+          # filelog path: structlog JSON fields live in the body map.
           - set(severity_text, body["level"]) where body["level"] != nil
           - set(severity_number, SEVERITY_NUMBER_INFO) where body["level"] == "info"
           - set(severity_number, SEVERITY_NUMBER_WARN) where body["level"] == "warning"
