@@ -1,6 +1,6 @@
 # 03 — Correlación cross-signal (verify_correlation.py)
 
-> **Fecha:** 2026-10-11T18:56:18Z · **Proyecto:** `otel-lab-obs-2610` · **Endpoint:** `http://localhost:18080` · **trace_id inyectado:** `9443c8858ea40016e2767699b95dbeb3`
+> **Fecha:** 2026-10-11T18:59:24Z · **Proyecto:** `otel-lab-obs-2610` · **Endpoint:** `http://localhost:18080` · **trace_id inyectado:** `e1ac08c9fcf8b0bafdb95528cc084903`
 
 | # | Aserción | Estado | Razón |
 |---|---|---|---|

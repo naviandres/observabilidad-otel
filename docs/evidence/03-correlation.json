@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-10-11T18:56:18Z",
+  "timestamp": "2026-10-11T18:59:24Z",
   "project": "otel-lab-obs-2610",
   "endpoint": "http://localhost:18080",
-  "trace_id": "9443c8858ea40016e2767699b95dbeb3",
+  "trace_id": "e1ac08c9fcf8b0bafdb95528cc084903",
   "aserciones": [
     {
       "id": 1,
@@ -20,7 +20,7 @@
       "estado": "PASS",
       "razon": "",
       "detalles": {
-        "x-trace-id": "9443c8858ea40016e2767699b95dbeb3"
+        "x-trace-id": "e1ac08c9fcf8b0bafdb95528cc084903"
       }
     },
     {
@@ -106,7 +106,7 @@
           "payment.gateway_call"
         ],
         "total_spans": 23,
-        "trace_id": "9443c8858ea40016e2767699b95dbeb3"
+        "trace_id": "e1ac08c9fcf8b0bafdb95528cc084903"
       }
     },
     {
@@ -120,7 +120,7 @@
           "service-a",
           "service-b"
         ],
-        "filtro": "jsonPayload.trace_id=\"9443c8858ea40016e2767699b95dbeb3\""
+        "filtro": "jsonPayload.trace_id=\"e1ac08c9fcf8b0bafdb95528cc084903\""
       }
     },
     {
