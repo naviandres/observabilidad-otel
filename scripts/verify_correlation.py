@@ -26,6 +26,7 @@ import argparse
 import json
 import re
 import secrets
+import shutil
 import subprocess  # noqa: S404  (gcloud/aws CLIs are the documented auth path)
 import sys
 import time
@@ -244,12 +245,19 @@ def _maybe_json(raw: str) -> Any:
 def gcloud_access_token(project: str, timeout: float = 30.0) -> str:
     """Return an OAuth access token from the gcloud ADC (no SDK dependency).
 
+    The binary is resolved with ``shutil.which`` because on Windows the gcloud
+    CLI is a ``.cmd`` shim that ``subprocess`` cannot find by bare name
+    (``WinError 2``).
+
     Raises:
         AuthError: when the gcloud CLI is missing or the token cannot be
             printed (no ADC configured).
     """
+    gc = shutil.which("gcloud") or shutil.which("gcloud.cmd")
+    if gc is None:
+        raise AuthError("gcloud no encontrado en PATH (SDK de Google Cloud no instalado)")
     cmd = [
-        "gcloud",
+        gc,
         "auth",
         "print-access-token",
         f"--project={project}",

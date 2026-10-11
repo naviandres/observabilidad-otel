@@ -14,6 +14,7 @@ import json
 import sys
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -397,6 +398,51 @@ def test_gcp_auth_error_fails_all_three(vc, monkeypatch, tmp_path):
     payload = _read_payload(json_path)
     for assertion_id in (10, 11, 12):
         assert _assertion(payload, assertion_id)["estado"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# gcloud binary resolution (Windows .cmd shim, WinError 2 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_gcloud_token_resolves_shim_with_which(vc, monkeypatch):
+    """The token call must go through shutil.which, never the bare 'gcloud'."""
+    monkeypatch.setattr(vc.shutil, "which", lambda name: f"C:\\gcloud\\{name}.cmd")
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="ya29.fake-token\n", stderr="")
+
+    monkeypatch.setattr(vc.subprocess, "run", fake_run)
+    assert vc.gcloud_access_token("otel-lab-obs-2610") == "ya29.fake-token"
+    assert captured["cmd"][0] == "C:\\gcloud\\gcloud.cmd"
+    assert captured["cmd"][1:3] == ["auth", "print-access-token"]
+
+
+def test_gcloud_token_falls_back_to_gcloud_cmd(vc, monkeypatch):
+    """which('gcloud') may miss on Windows while which('gcloud.cmd') hits."""
+    seen: list[str] = []
+
+    def only_cmd(name):
+        seen.append(name)
+        return "C:\\gcloud\\gcloud.cmd" if name == "gcloud.cmd" else None
+
+    monkeypatch.setattr(vc.shutil, "which", only_cmd)
+    monkeypatch.setattr(
+        vc.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="tok", stderr=""),
+    )
+    assert vc.gcloud_access_token("p") == "tok"
+    assert seen == ["gcloud", "gcloud.cmd"]
+
+
+def test_gcloud_token_missing_binary_raises_auth_error(vc, monkeypatch):
+    """Without the CLI in PATH the failure is an AuthError, not WinError 2."""
+    monkeypatch.setattr(vc.shutil, "which", lambda name: None)
+    with pytest.raises(vc.AuthError, match="gcloud no encontrado"):
+        vc.gcloud_access_token("p")
 
 
 # ---------------------------------------------------------------------------
