@@ -65,24 +65,28 @@ receivers:
     start_at: end
     operators:
       # Linea CRI de containerd: "<ts> <stream> <flags> <message>".
+      # contrib 0.162.0 exige prefijo en parse_from: la salida del regex va
+      # al body (default parse_to), de ahi body.<campo> en los sub-parsers.
       - type: regex_parser
         regex: '^(?P<log_timestamp>\S+) (?P<log_stream>\S+) (?P<log_flags>\S+) (?P<message>.*)$'
         timestamp:
-          parse_from: log_timestamp
+          parse_from: body.log_timestamp
           layout_type: strptime
           layout: '%Y-%m-%dT%H:%M:%S.%fZ'
-      # El message es JSON structlog -> body pasa a ser el mapa de campos.
+      # El message es JSON structlog -> los campos pasan a attributes (parse_to),
+      # dejando el body como el mensaje original.
       - type: json_parser
-        parse_from: message
+        parse_from: body.message
+        parse_to: attributes
       # trace_id/span_id hex de structlog -> campos de traza del registro;
       # el transform/logs los convierte en logging.googleapis.com/trace.
       - type: trace_parser
         trace_parser:
-          parse_from: trace_id
+          parse_from: attributes.trace_id
         span_parser:
-          parse_from: span_id
+          parse_from: attributes.span_id
       - type: severity_parser
-        parse_from: level
+        parse_from: attributes.level
 
 processors:
   # PLAN §2.A: memory_limiter FIRST — without it a traffic spike OOM-kills the
