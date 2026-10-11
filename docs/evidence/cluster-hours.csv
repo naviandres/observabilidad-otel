@@ -1,0 +1,4 @@
+date,cluster,action,timestamp_utc,hours,fee_usd_per_hour,subtotal_usd,notes
+2026-10-11,otel-lab-std,create,2026-10-11T03:52:00Z,,0.10,,GKE Standard zonal us-central1-a; node pool spot e2-small autoscaling 0-1; fee de control plano arranca al crear el cluster
+2026-10-11,otel-lab-std,delete,2026-10-11T14:16:00Z,,0.10,,teardown (gcloud container clusters delete) completado; clusters list = vacio; fee detenido
+2026-10-11,otel-lab-std,summary,2026-10-11T03:52:00Z/2026-10-11T14:16:00Z,10.4,0.10,1.04,uptime 10h24m (03:52Z->14:16Z) = 10.4h x $0.10/h fee plano = ~$1.04 USD; coste del nodo spot NO incluido en esta linea
