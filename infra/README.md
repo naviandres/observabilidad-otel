@@ -3,8 +3,8 @@
 Dos roots independientes (nunca uno único para las dos nubes):
 
 - `infra/aws/` — provider `aws`, state en S3 con locking nativo. **Aún no
-  implementado**: llega con la lado AWS de la fase 5; este README documenta hoy
-  la lado GCP y se actualizará con el bootstrap exacto de AWS cuando exista.
+  implementado**: llega con el lado AWS de la fase 5; este README documenta hoy
+  el lado GCP y se actualizará con el bootstrap exacto de AWS cuando exista.
 - `infra/gcp/` — providers `google` + `google-beta` (solo budget) + `helm`,
   state en GCS con locking nativo (object versioning del bucket de state).
 
@@ -21,32 +21,159 @@ Dos roots independientes (nunca uno único para las dos nubes):
 gcloud auth application-default set-quota-project otel-lab-obs-2610
 ```
 
-### Patrón de ejecución
+- El entrypoint de `hashicorp/terraform:1.9.8` es `terraform`. Por eso el
+  comando correcto es `... hashicorp/terraform:1.9.8 plan ...`, **no**
+  `... hashicorp/terraform:1.9.8 terraform plan ...`.
+- `gcp_project` y `gcp_region` se pasan SIEMPRE con `-var` en `plan`/`apply`
+  (sin default a propósito; ver la nota de riesgo de desvío de región en el plan
+  del proyecto). En PowerShell 5.1, `terraform plan` acepta `-out tfplan.bin`
+  con espacio; `-out=tfplan.bin` se probó y falla en esta imagen, así que este
+  README usa la variante verificada.
 
-Desde `D:\Projects\lab_obs` (rutas de mount en forma unix para Docker Desktop):
+### Comandos literales verificados
+
+Desde `D:\Projects\lab_obs`. Cada bloque es un comando completo, sin elipsis:
 
 ```powershell
+# 1. init (backend GCS + providers google/google-beta/helm)
 docker run --rm `
   -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
   -w /infra/infra/gcp `
   -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
-  -e TF_VAR_gcp_project=otel-lab-obs-2610 `
-  -e TF_VAR_gcp_region=us-central1 `
   -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
-  hashicorp/terraform:1.9.8 <comando>
+  hashicorp/terraform:1.9.8 init -input=false
+
+# 2. workspaces: list, crear solo la primera vez, seleccionar lab
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 workspace list
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 workspace new lab
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 workspace new bench
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 workspace select lab
+
+# 3. fmt + validate
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 fmt -check -recursive
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 validate
+
+# 4. plan 0-diff contra la realidad (cluster en reposo)
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 plan -detailed-exitcode -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1
+
+# 5. plan guardado + guard_cost por stdin
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 plan -input=false -out tfplan.bin -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 show -json tfplan.bin | & ".venv\Scripts\python.exe" "src/observabilidad-otel/scripts/guard_cost.py" --provider google
 ```
 
-`gcp_project` y `gcp_region` se pasan SIEMPRE por `-var`/`TF_VAR_*` (sin
-default a propósito; ver la nota de riesgo de desvío de región en el plan del
-proyecto).
+### Salidas reales de la sesión de verificación
+
+```text
+$ docker run ... hashicorp/terraform:1.9.8 init -input=false
+Initializing the backend...
+Initializing modules...
+Initializing provider plugins...
+- Reusing previous version of hashicorp/google-beta from the dependency lock file
+- Reusing previous version of hashicorp/helm from the dependency lock file
+- Reusing previous version of hashicorp/google from the dependency lock file
+- Using previously-installed hashicorp/google-beta v6.50.0
+- Using previously-installed hashicorp/helm v2.17.0
+- Using previously-installed hashicorp/google v6.50.0
+
+Terraform has been successfully initialized!
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 workspace list
+  default
+  bench
+* lab
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 workspace new lab
+Workspace "lab" already exists
+exit=1
+
+$ docker run ... hashicorp/terraform:1.9.8 workspace new bench
+Workspace "bench" already exists
+exit=1
+
+$ docker run ... hashicorp/terraform:1.9.8 workspace select lab
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 fmt -check -recursive
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 validate
+Success! The configuration is valid.
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 plan -detailed-exitcode -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1
+...
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 plan -input=false -out tfplan.bin -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1
+...
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+exit=0
+
+$ docker run ... hashicorp/terraform:1.9.8 show -json tfplan.bin | .venv\Scripts\python.exe src/observabilidad-otel/scripts/guard_cost.py --provider google
+guard_cost: OK — 0 violaciones (provider=google)
+exit=0
+```
 
 ### Workspaces
-
-```powershell
-... terraform workspace new lab    # ya creado
-... terraform workspace new bench  # ya creado
-... terraform workspace select lab
-```
 
 - `lab` (el activo): todo el inventario, incluido budget + dashboard.
 - `bench`: mismos recursos SIN budget ni dashboard (los recursos llevan
@@ -115,12 +242,19 @@ Notas del import (verificadas en sesión):
 ### Ciclo de sesión del cluster (apply/destroy)
 
 Estado en reposo = `cluster_enabled=0` (el cluster es el recurso caro:
-$0.10/h de fee de plano; solo vive durante sesiones de trabajo).
+$0.10/h de fee de plano; solo vive durante sesiones de trabajo). Estos comandos
+usan el mismo entrypoint literal verificado arriba; no se ejecutan en una
+revisión read-only porque crearían/destruirían recursos:
 
 ```powershell
 # sesion: levantar cluster + pool spot (zonal us-central1-a, e2-medium spot,
 # autoscaling 0-1, Workload Identity, deletion_protection=false)
-... -e TF_VAR_cluster_enabled=1 terraform apply -input=false
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 apply -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1 -var cluster_enabled=1
 
 # el provider GA no puede gestionar el add-on Secret Manager (solo beta):
 # habilitarlo tras el apply (o el helm install del driver CSI):
@@ -129,11 +263,27 @@ gcloud container clusters update otel-lab-std --zone us-central1-a `
 
 # workloads (requiere cluster vivo; el kubeconfig se genera dinamicamente con
 # ADC dentro del modulo infra/gcp/deploy):
-... -e TF_VAR_cluster_enabled=1 -e TF_VAR_deploy_workloads=1 terraform apply -input=false
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 apply -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1 -var cluster_enabled=1 -var deploy_workloads=1
 
 # teardown de la sesion: quitar workloads y cluster; la infra permanente NO se toca
-... -e TF_VAR_cluster_enabled=1 terraform destroy -input=false   # helm_release
-... terraform apply -input=false                                  # cluster_enabled=0 por defecto: destruye el cluster
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 destroy -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1 -var cluster_enabled=1 -var deploy_workloads=1
+
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 apply -input=false -var gcp_project=otel-lab-obs-2610 -var gcp_region=us-central1
 ```
 
 Regla operativa: *la sesión de nube se enciende para trabajar y se destruye al
@@ -141,13 +291,24 @@ terminar; registrar horas y coste en `docs/evidence/cluster-hours.csv`.*
 
 ### guard_cost (lista negra de coste)
 
+Opción stdin, verificada arriba:
+
 ```powershell
-... terraform plan -input=false "-out=tfplan.bin"
-... --entrypoint /bin/sh hashicorp/terraform:1.9.8 -c "terraform show -json tfplan.bin > tfplan.json"
-python src/observabilidad-otel/scripts/guard_cost.py --provider google --plan-file src/observabilidad-otel/infra/gcp/tfplan.json
+docker run --rm `
+  -v "/d/Projects/lab_obs/src/observabilidad-otel:/infra" `
+  -w /infra/infra/gcp `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json `
+  -v "/c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro" `
+  hashicorp/terraform:1.9.8 show -json tfplan.bin | & ".venv\Scripts\python.exe" "src/observabilidad-otel/scripts/guard_cost.py" --provider google
 ```
 
-O en pipe: `terraform show -json tfplan.bin | python scripts/guard_cost.py --provider google`.
+Opción `--plan-file`, verificada con `cmd /c` para evitar el BOM de PowerShell:
+
+```powershell
+cmd /c "docker run --rm -v /d/Projects/lab_obs/src/observabilidad-otel:/infra -w /infra/infra/gcp -e GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json -v /c/Users/Miguel/AppData/Roaming/gcloud/application_default_credentials.json:/creds/adc.json:ro hashicorp/terraform:1.9.8 show -json tfplan.bin > src\observabilidad-otel\infra\gcp\tfplan.json"
+& ".venv\Scripts\python.exe" "src/observabilidad-otel/scripts/guard_cost.py" --provider google --plan-file "src/observabilidad-otel/infra/gcp/tfplan.json"
+```
+
 Exit 1 + reporte por recurso si el plan porta algo de la lista negra (Cloud
 NAT, Autopilot, Cloud SQL, LB/forwarding rules/IP reservada, Cloud Run con
 min-instances>0, pools no-spot). Tambien existe `--provider aws` (mismo
