@@ -22,7 +22,7 @@ OTEL_TRACES_EXPORTER ?= googlecloud
 
 GCLOUD := gcloud --project $(GCP_PROJECT_ID)
 
-.PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp port-gcp
+.PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp port-gcp port-jaeger-gcp
 
 # gcp-start — cluster GKE Standard ZONAL us-central1-a, release channel regular,
 # 1 nodo spot e2-small con autoscaling 0-1, private Google Access (SIN Cloud
@@ -87,3 +87,9 @@ deploy-gcp:
 port-gcp:
 	kubectl -n $(GCP_NAMESPACE) port-forward svc/service-a 8080:8080 & \
 	kubectl -n $(GCP_NAMESPACE) port-forward svc/otel-lab-collector 4317:4317 8889:8889
+
+# port-jaeger-gcp — Jaeger UI dentro del cluster (§2.B-GCP, sin ingress publico).
+# La UI queda en http://localhost:16686; el waterfall service-a->service-b->DB
+# se consulta ahi (o via la API /api/traces). port-forward autenticado.
+port-jaeger-gcp:
+	kubectl -n $(GCP_NAMESPACE) port-forward svc/jaeger-ui-on-gcp 16686:16686

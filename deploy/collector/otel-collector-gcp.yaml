@@ -12,16 +12,17 @@
 #     validate --config=/cfg/otel-collector-gcp.yaml
 #
 # Benchmark traces toggle (PLAN §3.4 C2): the traces pipeline exports to
-# ${env:OTEL_TRACES_EXPORTER:-googlecloud}. Normal mode -> Cloud Trace. During
-# the benchmark the Helm values / Makefile set OTEL_TRACES_EXPORTER=nop so the
-# pipeline still exists but sends nothing to Cloud Trace (≈$0 ingest); the
-# `nop` exporter below is what the env resolves to in that mode.
+# ${env:OTEL_TRACES_EXPORTER:-googlecloud} (Cloud Trace) PLUS the in-cluster
+# Jaeger (otlphttp/jaeger-gcp). Normal mode -> Cloud Trace + Jaeger. During the
+# benchmark the Helm values / Makefile set OTEL_TRACES_EXPORTER=nop so the
+# managed-trace export stops (≈$0 Cloud Trace ingest) while the free in-cluster
+# Jaeger still receives the spans; the `nop` exporter below is what the env
+# resolves to in that mode.
 #
-# Deferred exporters (decision 2026-10-11: Grafana Cloud
-# hub deferred, section C closed local-only; Jaeger-on-GCP still pending):
+# Deferred exporters (decision 2026-10-11: Grafana Cloud hub deferred, section C
+# closed local-only):
 #   otlphttp/tempo / otlphttp/loki -> reactivate here when the Grafana Cloud
 #   hub decision is revisited (same blocks as otel-collector-aws.yaml L145-154).
-#   otlphttp/jaeger-gcp -> added when Jaeger ships in the cluster.
 
 receivers:
   # PLAN §2.A: gRPC :4317 + HTTP :4318.
@@ -179,6 +180,13 @@ exporters:
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: otel
+  # Jaeger-on-GCP (PLAN §2.A-GCP/§3.C): the in-cluster all-in-one receives the
+  # same spans as Cloud Trace (fan-out) so the service-a -> service-b -> DB
+  # waterfall is visible in the Jaeger UI over
+  # `kubectl port-forward svc/jaeger-ui-on-gcp 16686:16686` (§2.B-GCP: no public
+  # ingress). OTLP/HTTP :4318, enabled by COLLECTOR_OTLP_ENABLED=true in the chart.
+  otlphttp/jaeger-gcp:
+    endpoint: http://jaeger-ui-on-gcp:4318
   # Sink used by the traces pipeline when OTEL_TRACES_EXPORTER=nop (benchmark,
   # §3.4 C2). Declared explicitly so the pipeline resolves in both modes.
   nop:
@@ -203,8 +211,10 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection, resource, batch]
-      # Benchmark toggle: OTEL_TRACES_EXPORTER=nop during the benchmark (§3.4 C2).
-      exporters: ["${env:OTEL_TRACES_EXPORTER:-googlecloud}"]
+      # Fan-out (PLAN §2.A-GCP/§3.C): managed Cloud Trace + in-cluster Jaeger.
+      # Benchmark toggle (OTEL_TRACES_EXPORTER=nop, §3.4 C2) swaps only the
+      # managed exporter out; Jaeger-on-GCP is free and stays wired.
+      exporters: ["${env:OTEL_TRACES_EXPORTER:-googlecloud}", otlphttp/jaeger-gcp]
     metrics:
       receivers: [otlp, prometheus, hostmetrics]
       processors: [memory_limiter, resourcedetection, resource, batch]

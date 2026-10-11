@@ -125,3 +125,22 @@ postgres:
       cpu: "1"
       memory: 256Mi
 
+jaeger:
+  image:
+    # Jaeger all-in-one pinneado, mismo tag que el compose local (deploy/
+    # docker-compose.observability.yml, PLAN §2.A-GCP/§3.C). OTLP habilitado por
+    # COLLECTOR_OTLP_ENABLED=true; recibe el fan-out de trazas del Collector.
+    repository: jaegertracing/all-in-one
+    tag: "1.76.0"
+  containerPort: 16686   # Jaeger UI
+  servicePort: 16686     # ClusterIP (acceso por port-forward, §2.B-GCP)
+  otlpHttpPort: 4318     # OTLP/HTTP que consume otlphttp/jaeger-gcp del Collector
+  resources:
+    requests:
+      # 20m: ver nota en collector (GKE >=1.36 y sus system-pods).
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
