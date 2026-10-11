@@ -1,0 +1,210 @@
+# OTel Collector — GCP / contrib mode (GKE Standard, PLAN §2.A-GCP/§2.B-GCP).
+#
+# Mounted on the GKE collector pod via Helm ConfigMap (helm/otel-lab, feature #21);
+# the image is otel/opentelemetry-collector-contrib:0.162.0 — NOT ADOT (PLAN §2.C:
+# each cloud config is validated with the binary of its own image).
+#
+# Validation (PLAN §2.C):
+#
+#   docker run --rm -e GCP_PROJECT_ID=otel-lab-obs-2610 `
+#     -v "${PWD}/deploy/collector:/cfg" `
+#     otel/opentelemetry-collector-contrib:0.162.0 `
+#     validate --config=/cfg/otel-collector-gcp.yaml
+#
+# Benchmark traces toggle (PLAN §3.4 C2): the traces pipeline exports to
+# ${env:OTEL_TRACES_EXPORTER:-googlecloud}. Normal mode -> Cloud Trace. During
+# the benchmark the Helm values / Makefile set OTEL_TRACES_EXPORTER=nop so the
+# pipeline still exists but sends nothing to Cloud Trace (≈$0 ingest); the
+# `nop` exporter below is what the env resolves to in that mode.
+#
+# Deferred exporters (decision 2026-10-11, progress/current.md — Grafana Cloud
+# hub deferred, section C closed local-only; Jaeger-on-GCP is feature #25):
+#   otlphttp/tempo / otlphttp/loki -> reactivate here when the Grafana Cloud
+#   hub decision is revisited (same blocks as otel-collector-aws.yaml L145-154).
+#   otlphttp/jaeger-gcp -> added by feature #25 when Jaeger ships in the cluster.
+
+receivers:
+  # PLAN §2.A: gRPC :4317 + HTTP :4318.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  # PLAN §2.A/C5: scrape the collector's own telemetry on 127.0.0.1:8888 so
+  # self-metrics are re-exported on :8889 — read from the local scrape, never
+  # from the Cloud Monitoring metrics API (ADR-005).
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+  # PLAN §2.A-GCP: node/pod infra metrics (cpu, memory, processes) -> Cloud
+  # Monitoring. There is no cloudwatch-agent sidecar in GCP; the collector
+  # itself covers infra metrics (§2.B-GCP).
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      processes:
+  # #21b: fuente del pipeline de logs. La app emite structlog JSON a stdout
+  # (el SDK no exporta logs por OTLP; PLAN §1 L454 preveia
+  # opentelemetry-instrumentation-logging y no se cableo en #2). El collector
+  # lee el stdout de los pods del NODO (cluster single-node) y lo sube a Cloud
+  # Logging con el trace_id normalizado en logging.googleapis.com/trace
+  # (checklist §2.C). log_name dedicado (otel-app-logs) para NO pisar el
+  # logs/stdout que ya escribe el fluent-bit gestionado de GKE (R-15:
+  # duplicacion inevitable, separada por logName; documentado en el informe).
+  filelog:
+    include:
+      - /var/log/pods/otel-lab_service-a-*/*/*.log
+      - /var/log/pods/otel-lab_service-b-*/*/*.log
+    start_at: end
+    operators:
+      # Linea CRI de containerd: "<ts> <stream> <flags> <message>".
+      - type: regex_parser
+        regex: '^(?P<log_timestamp>\S+) (?P<log_stream>\S+) (?P<log_flags>\S+) (?P<message>.*)$'
+        timestamp:
+          parse_from: log_timestamp
+          layout_type: strptime
+          layout: '%Y-%m-%dT%H:%M:%S.%fZ'
+      # El message es JSON structlog -> body pasa a ser el mapa de campos.
+      - type: json_parser
+        parse_from: message
+      # trace_id/span_id hex de structlog -> campos de traza del registro;
+      # el transform/logs los convierte en logging.googleapis.com/trace.
+      - type: trace_parser
+        trace_parser:
+          parse_from: trace_id
+        span_parser:
+          parse_from: span_id
+      - type: severity_parser
+        parse_from: level
+
+processors:
+  # PLAN §2.A: memory_limiter FIRST — without it a traffic spike OOM-kills the
+  # collector, and on a shared 2 GiB e2-small node it would take the services
+  # down too. Calibrated with GOMEMLIMIT=192MiB / ~350 MB limits (helm values).
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  # PLAN §2.A-GCP: detectors env, gcp, system -> gcp.* and k8s.* attributes;
+  # override:false completes (never overwrites) what the app already set, so
+  # service.name survives.
+  resourcedetection:
+    detectors: [env, gcp, system]
+    timeout: 2s
+    override: false
+  # PLAN §2.A: normalise deployment.environment and cloud.platform on every
+  # signal so the three pillars can be filtered the same way.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: lab
+        action: upsert
+      - key: cloud.platform
+        value: gcp_gke
+        action: upsert
+  # PLAN §2.A-GCP `transform/logs`: rename log.severity -> severity_text,
+  # guarantee a string body, and normalise logging.googleapis.com/trace as a
+  # resource attribute (projects/<id>/traces/<trace_id>) so Cloud Logging can
+  # filter/join by trace. contrib-only processor (not in the ADOT config).
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, attributes["log.severity"]) where attributes["log.severity"] != nil
+          - delete_key(attributes, "log.severity") where attributes["log.severity"] != nil
+          # #21b filelog path: structlog JSON fields live in the body map.
+          - set(severity_text, body["level"]) where body["level"] != nil
+          - set(severity_number, SEVERITY_NUMBER_INFO) where body["level"] == "info"
+          - set(severity_number, SEVERITY_NUMBER_WARN) where body["level"] == "warning"
+          - set(severity_number, SEVERITY_NUMBER_ERROR) where body["level"] == "error"
+          - set(severity_number, SEVERITY_NUMBER_DEBUG) where body["level"] == "debug"
+          - set(body, Concat([body], "")) where IsString(body) == false
+          - set(resource.attributes["logging.googleapis.com/trace"], Concat(["projects/${env:GCP_PROJECT_ID}/traces/", trace_id], "")) where trace_id != ""
+  # PLAN §2.A: strip PII (card*, email, authorization) — cost + security.
+  attributes/redact:
+    actions:
+      - key: card.number
+        action: delete
+      - key: card.cvv
+        action: delete
+      - key: email
+        action: delete
+      - key: authorization
+        action: delete
+  # PLAN §2.A: batch LAST, timeout 5s / send_batch_size 1024 (explicit
+  # latency-vs-throughput balance).
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 5s
+
+extensions:
+  # PLAN §2.A: health_check :13133 + pprof 127.0.0.1:1777 (never exposed).
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 127.0.0.1:1777
+
+exporters:
+  # Fan-out (PLAN §2.A-GCP): traces -> Cloud Trace, logs -> Cloud Logging,
+  # metrics -> Cloud Monitoring. Credentials come from Workload Identity on
+  # the pod (no JSON keys, §2.B-GCP); project resolved from env.
+  googlecloud:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      # LogName dedicado para la senal de logs (solo la afecta): separa las
+      # entradas del pipeline OTel de los logs/stdout que sube fluent-bit de GKE.
+      default_log_name: otel-app-logs
+  # Managed Prometheus series in Cloud Monitoring (PLAN §2.A-GCP). Kept scoped
+  # to the app counters via the metric names themselves (§3.4 C1: histograms
+  # are read from Prometheus, not from Cloud Monitoring).
+  googlemanagedprometheus:
+    project: ${env:GCP_PROJECT_ID}
+  # Prometheus exposition on :8889 for the local scrape of the deployment
+  # checklist (otelcol_exporter_send_failed_spans / queue_size read locally,
+  # never from managed metrics APIs — §2.C checklist, ADR-005).
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otel
+  # Sink used by the traces pipeline when OTEL_TRACES_EXPORTER=nop (benchmark,
+  # §3.4 C2). Declared explicitly so the pipeline resolves in both modes.
+  nop:
+
+service:
+  extensions: [health_check, pprof]
+  # PLAN §2.A: self-telemetry metrics on :8888 level detailed (feeds the
+  # prometheus receiver above -> panel 6); collector's own logs at info.
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    # 3 pipelines (traces/metrics/logs, PLAN §2.A-GCP).
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      # Benchmark toggle: OTEL_TRACES_EXPORTER=nop during the benchmark (§3.4 C2).
+      exporters: ["${env:OTEL_TRACES_EXPORTER:-googlecloud}"]
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [googlecloud, googlemanagedprometheus, prometheus]
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, resourcedetection, resource, transform/logs, attributes/redact, batch]
+      exporters: [googlecloud]

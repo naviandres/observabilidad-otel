@@ -1,0 +1,115 @@
+# helm/otel-lab/values.yaml
+# GKE Standard single-node profile (e2-small, 2 GiB) — PLAN §2.B-GCP.
+# Reglas duras: NUNCA tag `latest`; NUNCA valores de secretos aqui (Secret
+# Manager via CSI por nombre, §2.B-GCP); regiones/proyecto explicitos.
+
+global:
+  project: otel-lab-obs-2610
+  region: us-central1
+  environment: lab
+
+# Spot node pool: los pods se programan contra el pool spot `e2-small` con su
+# taint estandar de GKE (tolerancia a desalojo: grace bajo + preStop, R-22).
+spot:
+  nodeSelector:
+    cloud.google.com/gke-spot: "true"
+  tolerations:
+    - key: cloud.google.com/gke-spot
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+terminationGracePeriodSeconds: 30
+preStopSleepSeconds: 5
+
+serviceAccount:
+  # SA de Kubernetes del Collector, enlazada al SA de GCP via Workload
+  # Identity (binding hecho fuera del chart — ver docs/deployment.md #21b).
+  name: otel-lab-collector
+
+secrets:
+  pgPassword:
+    secretName: pg-password            # nombre EXACTO del secreto en Secret Manager
+    providerClass: otel-lab-pg-password
+    mountPath: /run/secrets/pg-password
+    fileName: pg-password
+    # Nombre del driver CSI segun instalacion (feature #21b):
+    #   add-on GKE --enable-secret-manager -> secrets-store-gke.csi.k8s.io
+    #   driver comunitario por Helm        -> secrets-store.csi.k8s.io
+    # El cluster del lab usa el add-on de GKE (21b), por eso el valor gke.
+    csiDriver: secrets-store-gke.csi.k8s.io
+    # Nombre del provider dentro del SecretProviderClass (mismo eje driver/comunidad):
+    #   add-on GKE -> gke (el ds provider-gke fija PROVIDER_NAME=gke y registra gke.sock
+    #   en /etc/kubernetes/secrets-store-csi-providers; USER_AGENT es solo el user-agent)
+    #   provider-gcp comunitario -> gcp-secret-manager
+    providerName: gke
+    # Requiere en el cluster (feature #21b): driver + provider-gcp instalados
+    # (aqui via add-on --enable-secret-manager). Sin driver, los pods quedan
+    # en ContainerCreating.
+
+collector:
+  image:
+    # contrib oficial pinneado, mismo tag que docker-compose.yml (PLAN §2.C:
+    # el YAML GCP se valida con el binario contrib). No vive en AR: es imagen
+    # publica; las de app van por AR (abajo).
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.162.0"
+  gcpServiceAccount: otel-lab-deploy@otel-lab-obs-2610.iam.gserviceaccount.com
+  env:
+    # Toggle benchmark (PLAN §3.4 C2): --set collector.env.OTEL_TRACES_EXPORTER=nop
+    # apaga el export a Cloud Trace; el pipeline apunta al exporter `nop`.
+    OTEL_TRACES_EXPORTER: googlecloud
+  # Presupuesto de memoria en el nodo 2 GiB compartido (PLAN §2.B-GCP):
+  # GOMEMLIMIT 192MiB + limits ~350Mi; el resto es para pg + 2 servicios + system DaemonSets.
+  goMemLimit: 192MiB
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 350Mi
+
+serviceA:
+  image:
+    repository: us-central1-docker.pkg.dev/otel-lab-obs-2610/otel-lab/service-a
+    tag: "0.1.0"   # tag fijado; se re-empuja desde AR al construir (Makefile build no incluido aqui)
+  containerPort: 8000
+  servicePort: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 160Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+serviceB:
+  image:
+    repository: us-central1-docker.pkg.dev/otel-lab-obs-2610/otel-lab/service-b
+    tag: "0.1.0"
+  containerPort: 8001
+  servicePort: 8001
+  resources:
+    requests:
+      cpu: 100m
+      memory: 160Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+postgres:
+  image:
+    repository: postgres
+    tag: "16-alpine"   # misma imagen que el compose local (D6: seed idéntico, benchmark honesto)
+  user: postgres
+  database: orders
+  # emptyDir a proposito: sin disco persistente = sin coste y el seed de
+  # init-scripts/ corre solo tras cada desalojo spot (lab efimero, §2.B-GCP).
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi

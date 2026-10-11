@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-lab-postgres-init
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+data:
+  # Mismo seed que el compose local (D6: misma imagen + mismo seed => A/B
+  # honesto). Fuente de verdad: init-scripts/ en la raiz del entregable;
+  # el Makefile `deploy-gcp` la sincroniza a files/init/ antes del helm.
+  {{- range $path, $bytes := .Files.Glob "files/init/*" }}
+  {{ base $path }}: |
+    {{- $bytes | toString | nindent 4 }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "otel-lab.labels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      {{- include "otel-lab.spotPlacement" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            # Password via Secret Manager CSI (nunca en values ni en un Secret
+            # de etcd en claro; el entrypoint oficial soporta *_FILE).
+            - name: POSTGRES_PASSWORD_FILE
+              value: "{{ .Values.secrets.pgPassword.mountPath }}/{{ .Values.secrets.pgPassword.fileName }}"
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds }}"]
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: pg-password
+              mountPath: {{ .Values.secrets.pgPassword.mountPath }}
+              readOnly: true
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        {{- include "otel-lab.pgSecretVolume" . | nindent 8 }}
+        - name: init-scripts
+          configMap:
+            name: otel-lab-postgres-init
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

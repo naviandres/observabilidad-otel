@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-b
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: service-b
+  template:
+    metadata:
+      labels:
+        {{- include "otel-lab.labels" . | nindent 8 }}
+        app.kubernetes.io/component: service-b
+    spec:
+      {{- include "otel-lab.spotPlacement" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: service-b
+          image: "{{ .Values.serviceB.image.repository }}:{{ .Values.serviceB.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          # Base de datos `inventory` (creada por el init-script 01-init.sh);
+          # password desde el secreto CSI, nunca del values.yaml.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export DATABASE_URL="postgresql://{{ .Values.postgres.user }}:$(cat {{ .Values.secrets.pgPassword.mountPath }}/{{ .Values.secrets.pgPassword.fileName }})@postgres:5432/inventory"
+              exec uvicorn app.main:app --host 0.0.0.0 --port {{ .Values.serviceB.containerPort }}
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-lab-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "service-b"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "service.name=service-b"
+          ports:
+            - name: http
+              containerPort: {{ .Values.serviceB.containerPort }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds }}"]
+          resources:
+            {{- toYaml .Values.serviceB.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "otel-lab.pgSecretMount" . | nindent 12 }}
+      volumes:
+        {{- include "otel-lab.pgSecretVolume" . | nindent 8 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-b
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service-b
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: service-b
+  ports:
+    - name: http
+      port: {{ .Values.serviceB.servicePort }}
+      targetPort: http
