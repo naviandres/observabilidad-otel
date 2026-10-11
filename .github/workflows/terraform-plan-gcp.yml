@@ -1,4 +1,4 @@
-# CI: terraform plan de la pata GCP + gate de coste (PLAN §5.A "Estado de
+# CI: terraform plan de la lado GCP + gate de coste (PLAN §5.A "Estado de
 # apply": `terraform plan` en cada PR + guard_cost.py; el APPLY solo ocurre
 # desde main con aprobacion manual — nunca aqui).
 #

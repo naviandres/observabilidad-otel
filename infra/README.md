@@ -3,8 +3,8 @@
 Dos roots independientes (nunca uno único para las dos nubes):
 
 - `infra/aws/` — provider `aws`, state en S3 con locking nativo. **Aún no
-  implementado**: llega con la pata AWS de la fase 5; este README documenta hoy
-  la pata GCP y se actualizará con el bootstrap exacto de AWS cuando exista.
+  implementado**: llega con la lado AWS de la fase 5; este README documenta hoy
+  la lado GCP y se actualizará con el bootstrap exacto de AWS cuando exista.
 - `infra/gcp/` — providers `google` + `google-beta` (solo budget) + `helm`,
   state en GCS con locking nativo (object versioning del bucket de state).
 
