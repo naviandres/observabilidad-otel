@@ -35,9 +35,10 @@ def vc():
 
 
 @pytest.fixture(autouse=True)
-def no_retry_sleeps(vc, monkeypatch):
-    """Keep the eventual-consistency retries deterministic and instant."""
-    monkeypatch.setattr(vc, "READ_RETRIES", 1)
+def no_polling_delays(vc, monkeypatch):
+    """Keep the ingestion-poll loops single-shot and instant in tests."""
+    monkeypatch.setattr(vc, "POLL_DEADLINE_S", 0.0)
+    monkeypatch.setattr(vc, "POLL_INTERVAL_S", 0.0)
 
 
 def _echoing_http_request(vc_module):
@@ -205,8 +206,10 @@ def _gcp_transport(trace_spans=None, log_entries=None, metric_types=None, series
     return fake
 
 
-def _span(name: str) -> dict[str, Any]:
-    return {"spanId": "0000000000000001", "displayName": {"value": name}}
+def _span(name: str, service: str | None = None) -> dict[str, Any]:
+    """Cloud Trace v1 REST span: name + labels.service.name (live shape)."""
+    labels = {"service.name": service} if service else {}
+    return {"spanId": "1", "name": name, "labels": labels}
 
 
 def _log_entry(container: str) -> dict[str, Any]:
@@ -244,7 +247,11 @@ def gcp_enabled(vc, monkeypatch):
 
 def test_gcp_happy_path_all_three_pass(vc, monkeypatch, tmp_path, gcp_enabled):
     transport = _gcp_transport(
-        trace_spans=[_span("order.process"), _span("order.validate"), _span("inventory.query")],
+        trace_spans=[
+            _span("POST /orders", "service-a"),
+            _span("order.process", "service-a"),
+            _span("POST /inventory/reserve", "service-b"),
+        ],
         log_entries=[_log_entry("service-a"), _log_entry("service-b")],
         metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
         series=[_counter_series([0, 3])],
@@ -257,6 +264,24 @@ def test_gcp_happy_path_all_three_pass(vc, monkeypatch, tmp_path, gcp_enabled):
     assert _assertion(payload, 12)["estado"] == "PASS"
     assert _assertion(payload, 12)["detalles"]["incremento_total"] == 3.0
     assert _assertion(payload, 13)["estado"] == "SKIP"
+
+
+def test_cloud_trace_attribution_prefers_service_name_label(vc, monkeypatch, tmp_path, gcp_enabled):
+    """Live shape: span names are HTTP routes; service.name labels do the work."""
+    transport = _gcp_transport(
+        trace_spans=[
+            _span("POST /orders", "service-a"),
+            _span("connect", "service-b"),
+        ],
+        log_entries=[_log_entry("service-a"), _log_entry("service-b")],
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(vc, monkeypatch, transport, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 0
+    row = _assertion(_read_payload(json_path), 10)
+    assert row["detalles"]["spans_service_a"] == ["POST /orders"]
+    assert row["detalles"]["spans_service_b"] == ["connect"]
 
 
 def test_cloud_trace_without_service_b_spans_fails(vc, monkeypatch, tmp_path, gcp_enabled):
@@ -300,6 +325,59 @@ def test_cloud_logging_single_service_fails(vc, monkeypatch, tmp_path, gcp_enabl
     row = _assertion(_read_payload(json_path), 11)
     assert row["estado"] == "FAIL"
     assert row["detalles"]["servicios"] == ["service-a"]
+
+
+def test_cloud_logging_text_payload_logger_attribution(vc, monkeypatch, tmp_path, gcp_enabled):
+    """Live filelog shape: structlog JSON stays in textPayload, no k8s labels."""
+    text_a = '{"event": "Order completed: x", "logger": "service-a", "trace_id": "t"}'
+    text_b = '{"event": "Inventory successfully reserved", "logger": "service-b"}'
+    entries = [
+        {
+            "logName": "projects/p/logs/otel-app-logs",
+            "resource": {"type": "k8s_cluster", "labels": {"cluster_name": "otel-lab-std"}},
+            "textPayload": "2026-10-11T18:35:46Z stderr F " + text_a,
+        },
+        {
+            "logName": "projects/p/logs/otel-app-logs",
+            "resource": {"type": "k8s_cluster", "labels": {"cluster_name": "otel-lab-std"}},
+            "textPayload": "2026-10-11T18:35:46Z stderr F " + text_b,
+        },
+        # Collector self-log echoing the payload must NOT attribute.
+        {
+            "logName": "projects/p/logs/stderr",
+            "resource": {"type": "k8s_cluster", "labels": {"cluster_name": "otel-lab-std"}},
+            "textPayload": "error helper/transformer.go Failed to process entry",
+        },
+    ]
+    transport = _gcp_transport(
+        trace_spans=[_span("order.process"), _span("inventory.query")],
+        log_entries=entries,
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(vc, monkeypatch, transport, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 0
+    row = _assertion(_read_payload(json_path), 11)
+    assert row["detalles"]["servicios"] == ["service-a", "service-b"]
+
+
+def test_cloud_logging_uses_resource_names_body(vc, monkeypatch, tmp_path, gcp_enabled):
+    """entries:list takes `resourceNames`; `projectNames` is a 400 regression."""
+    bodies: list[dict[str, Any]] = []
+
+    def spy(method, url, headers=None, body=None, timeout=15.0):
+        if "logging.googleapis.com" in url and body is not None:
+            bodies.append(body)
+        return _gcp_transport(
+            trace_spans=[_span("order.process"), _span("inventory.query")],
+            log_entries=[_log_entry("service-a"), _log_entry("service-b")],
+            metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+            series=[_counter_series([1])],
+        )(method, url, headers, body, timeout)
+
+    rc, _json = _run_main(vc, monkeypatch, spy, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 0
+    assert bodies and all("resourceNames" in b and "projectNames" not in b for b in bodies)
 
 
 def test_cloud_logging_falls_back_to_json_payload_filter(vc, monkeypatch, tmp_path, gcp_enabled):
@@ -418,6 +496,21 @@ def test_gcloud_token_resolves_shim_with_which(vc, monkeypatch):
     assert vc.gcloud_access_token("otel-lab-obs-2610") == "ya29.fake-token"
     assert captured["cmd"][0] == "C:\\gcloud\\gcloud.cmd"
     assert captured["cmd"][1:3] == ["auth", "print-access-token"]
+    # print-access-token ignores --format and prints nothing when it is
+    # present (live regression 2026-10-11): the call must stay bare.
+    assert not any(str(a).startswith("--format") for a in captured["cmd"])
+
+
+def test_gcloud_token_empty_stdout_raises_auth_error(vc, monkeypatch):
+    """A silent gcloud (no ADC) must not become a 'Bearer ' 401 downstream."""
+    monkeypatch.setattr(vc.shutil, "which", lambda name: "C:\\gcloud\\gcloud.cmd")
+    monkeypatch.setattr(
+        vc.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    with pytest.raises(vc.AuthError, match="vacio"):
+        vc.gcloud_access_token("p")
 
 
 def test_gcloud_token_falls_back_to_gcloud_cmd(vc, monkeypatch):

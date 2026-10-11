@@ -64,7 +64,9 @@ SERVICE_A_SPANS = frozenset(
 )
 SERVICE_B_SPANS = frozenset({"inventory.query", "payment.gateway_call"})
 
-CLOUDTRACE_URL = "https://cloudtrace.googleapis.com/v2/projects/{project}/traces/{trace_id}"
+# Cloud Trace's REST surface is v1 (v2 is gRPC-only; v2 REST paths return
+# HTML 404). v2/v1 preserve the W3C 32-hex id, so the id compares directly.
+CLOUDTRACE_URL = "https://cloudtrace.googleapis.com/v1/projects/{project}/traces/{trace_id}"
 LOGGING_LIST_URL = "https://logging.googleapis.com/v2/entries:list"
 DESCRIPTORS_URL = "https://monitoring.googleapis.com/v3/projects/{project}/metricDescriptors"
 TIMESERIES_URL = "https://monitoring.googleapis.com/v3/projects/{project}/timeSeries"
@@ -77,10 +79,14 @@ GMP_ORDERS_COUNTER = "prometheus.googleapis.com/orders_created_total/counter"
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-01$")
 
-# Managed backends are eventually consistent: retry reads a few times before
-# declaring a signal missing (each retry is a free read API call).
-READ_RETRIES = 3
-READ_RETRY_DELAY_S = 2.0
+# structlog writes "logger": "service-a|service-b" inside the JSON line; the
+# filelog->OTLP pipeline lands it in textPayload (verified live 2026-10-11).
+LOGGER_RE = re.compile(r'"logger":\s*"(service-[ab])"')
+
+# Managed backends ingest with a delay (batch exporter + backend lag is
+# 30-90 s): poll until the signal appears or the deadline expires.
+POLL_DEADLINE_S = 180.0
+POLL_INTERVAL_S = 12.0
 
 # Catalog of the 13 PLAN §3.A assertions: (id, nombre, obligatoria).
 ASSERTION_CATALOG: list[tuple[int, str, bool]] = [
@@ -261,7 +267,6 @@ def gcloud_access_token(project: str, timeout: float = 30.0) -> str:
         "auth",
         "print-access-token",
         f"--project={project}",
-        "--format=value(access_token)",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
@@ -269,32 +274,40 @@ def gcloud_access_token(project: str, timeout: float = 30.0) -> str:
         raise AuthError(f"gcloud no disponible: {exc}") from exc
     if proc.returncode != 0:
         raise AuthError(f"gcloud auth print-access-token fallo: {proc.stderr.strip()[:300]}")
-    return proc.stdout.strip()
+    token = proc.stdout.strip()
+    if not token:
+        # print-access-token does not honour --format: send it bare.
+        raise AuthError("gcloud auth print-access-token devolvio un token vacio (ADC?)")
+    return token
 
 
 def _span_display_name(span: dict[str, Any]) -> str:
-    """Extract the OTel span name from a Cloud Trace v2 span object."""
+    """Extract the OTel span name from a Cloud Trace span object (v1 REST)."""
     display = span.get("displayName")
     if isinstance(display, dict):
         return str(display.get("value", ""))
     return str(span.get("name", ""))
 
 
-def _retry_read(fn: Any, retry_on_empty: Any = None) -> Any:
-    """Call ``fn`` up to READ_RETRIES times while it yields "empty" answers.
+def _poll_until(fetch: Any, ready: Any) -> tuple[Any, bool]:
+    """Poll ``fetch`` until ``ready(result)`` or the deadline expires.
 
-    Managed backends (Cloud Trace/Logging) ingest with a delay, so a first
-    empty read is not conclusive. An exception (auth/HTTP) is final: it
-    propagates on the first attempt.
+    Cloud Trace/Logging/Monitoring ingest with a 30-90 s lag after the batch
+    exporter fires, so an empty first read is not conclusive (PLAN §3.A runs
+    right after live traffic). Transport/API errors propagate on the first
+    attempt: they are failures, not "not yet".
+
+    Returns:
+        ``(last_result, satisfied)``.
     """
-    last: Any = None
-    for attempt in range(READ_RETRIES):
-        last = fn()
-        if retry_on_empty is None or not retry_on_empty(last):
-            return last
-        if attempt < READ_RETRIES - 1:
-            time.sleep(READ_RETRY_DELAY_S)
-    return last
+    deadline = time.monotonic() + POLL_DEADLINE_S
+    result = fetch()
+    while not ready(result):
+        if time.monotonic() >= deadline:
+            return result, False
+        time.sleep(POLL_INTERVAL_S)
+        result = fetch()
+    return result, True
 
 
 # ---------------------------------------------------------------------------
@@ -358,11 +371,32 @@ def check_response_trace_header(
         )
 
 
-def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace_id: str) -> bool:
-    """A10: Cloud Trace v2 holds the injected trace with spans of both services.
+def _span_service(span: dict[str, Any]) -> str | None:
+    """Attribute a Cloud Trace span to a service.
 
-    Cloud Trace preserves the W3C 32-hex id (PLAN §3.B note), so the id is
-    compared directly. Returns True on PASS.
+    The live shape (verified 2026-10-11) carries the OTel resource attribute
+    as ``labels["service.name"]``; the span-name sets are the fallback for
+    older exporters that dropped the label.
+    """
+    labels = span.get("labels") or {}
+    svc = labels.get("service.name")
+    if svc in {"service-a", "service-b"}:
+        return str(svc)
+    name = _span_display_name(span)
+    if name in SERVICE_A_SPANS:
+        return "service-a"
+    if name in SERVICE_B_SPANS:
+        return "service-b"
+    return None
+
+
+def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace_id: str) -> bool:
+    """A10: Cloud Trace holds the injected trace with spans of both services.
+
+    Uses the v1 REST surface (v2 is gRPC-only; its REST paths answer HTML 404
+    — verified live). Cloud Trace preserves the W3C 32-hex id, so the id
+    compares directly. Polls until both services appear or the deadline
+    expires (batch-exporter + ingest lag). Returns True on PASS.
     """
     url = CLOUDTRACE_URL.format(project=project, trace_id=trace_id)
     auth = {"Authorization": f"Bearer {token}"}
@@ -376,24 +410,32 @@ def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace
                 return None
             raise
 
-    body = _retry_read(fetch, retry_on_empty=lambda b: not b or not b.get("spans"))
+    def services_of(body: Any) -> set[str]:
+        if not isinstance(body, dict):
+            return set()
+        spans = body.get("spans") or []
+        return {svc for s in spans if isinstance(s, dict) and (svc := _span_service(s))}
+
+    body, ok = _poll_until(fetch, ready=lambda b: {"service-a", "service-b"} <= services_of(b))
     if not isinstance(body, dict) or not body.get("spans"):
         report.register(
-            10, FAIL, razon="traza inyectada no encontrada en Cloud Trace", detalles={"url": url}
+            10, FAIL, razon="traza inyectada no encontrada en Cloud Trace (deadline agotado)",
+            detalles={"url": url},
         )
         return False
 
-    names = {_span_display_name(s) for s in body["spans"] if isinstance(s, dict)}
-    found_a = sorted(names & SERVICE_A_SPANS)
-    found_b = sorted(names & SERVICE_B_SPANS)
-    if found_a and found_b:
+    spans = body["spans"]
+    names_a = sorted(_span_display_name(s) for s in spans if _span_service(s) == "service-a")
+    names_b = sorted(_span_display_name(s) for s in spans if _span_service(s) == "service-b")
+    if names_a and names_b:
         report.register(
             10,
             PASS,
             detalles={
-                "spans_service_a": found_a,
-                "spans_service_b": found_b,
-                "total_spans": len(body["spans"]),
+                "spans_service_a": names_a,
+                "spans_service_b": names_b,
+                "total_spans": len(spans),
+                "trace_id": body.get("traceId", trace_id),
             },
         )
         return True
@@ -401,7 +443,7 @@ def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace
         10,
         FAIL,
         razon="la traza existe pero faltan spans de algun servicio",
-        detalles={"spans_service_a": found_a, "spans_service_b": found_b},
+        detalles={"spans_service_a": names_a, "spans_service_b": names_b},
     )
     return False
 
@@ -409,44 +451,65 @@ def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace
 def _entry_service(entry: dict[str, Any]) -> str | None:
     """Attribute a Cloud Logging entry to service-a/service-b.
 
-    The collector exports with ``resource.type=k8s_container`` and the
-    container name label; the structlog ``name`` field in jsonPayload is the
-    fallback.
+    Three shapes, in order of preference (all verified against the live
+    project on 2026-10-11): the k8s_container label set (OTLP path), the
+    structlog ``name``/``logger`` in jsonPayload, and the structlog JSON
+    line kept as text by the filelog pipeline (``"logger": "service-a"``
+    inside ``textPayload``).
     """
     labels = (entry.get("resource") or {}).get("labels") or {}
     svc = labels.get("container_name") or (entry.get("jsonPayload") or {}).get("name")
-    return svc if svc in {"service-a", "service-b"} else None
+    if svc in {"service-a", "service-b"}:
+        return str(svc)
+    payload_logger = (entry.get("jsonPayload") or {}).get("logger")
+    if payload_logger in {"service-a", "service-b"}:
+        return str(payload_logger)
+    # Text fallback for the current filelog pipeline (structlog JSON lands as
+    # text). Restricted to the dedicated logName so collector self-logs that
+    # echo a dropped payload cannot create false attribution.
+    if str(entry.get("logName", "")).endswith("/otel-app-logs"):
+        match = LOGGER_RE.search(entry.get("textPayload") or "")
+        if match:
+            return match.group(1)
+    return None
 
 
 def check_cloud_logging(report: CorrelationReport, token: str, project: str, trace_id: str) -> bool:
     """A11: Cloud Logging holds ≥1 entry per service carrying the trace id.
 
-    Primary filter is the normalized ``trace`` field (the collector's
-    transform/logs writes ``logging.googleapis.com/trace``); the fallback is
-    the raw ``jsonPayload.trace_id``. Returns True on PASS.
+    Filter chain (first one that yields entries wins): the normalized
+    ``trace`` field (``transform/logs`` writes
+    ``logging.googleapis.com/trace``), ``jsonPayload.trace_id``, and the
+    raw ``textPayload`` substring — the filelog pipeline lands the structlog
+    JSON as text without a normalized trace field (verified live). Polls
+    until both services appear or the deadline expires. Returns True on PASS.
     """
     auth = {"Authorization": f"Bearer {token}"}
     filters = [
         f'trace:"projects/{project}/traces/{trace_id}"',
         f'jsonPayload.trace_id="{trace_id}"',
+        f'textPayload:"{trace_id}"',
     ]
-    entries: list[dict[str, Any]] = []
-    used_filter = filters[0]
-    for filt in filters:
-        used_filter = filt
 
-        def fetch(f: str = filt) -> list[dict[str, Any]]:
+    def fetch_round() -> tuple[str, list[dict[str, Any]]]:
+        """Try every filter once; return the first non-empty (filter, entries)."""
+        for filt in filters:
             _status, _headers, body = http_request(
                 "POST",
                 LOGGING_LIST_URL,
                 headers=auth,
-                body={"projectNames": [f"projects/{project}"], "filter": f, "pageSize": 256},
+                body={"resourceNames": [f"projects/{project}"], "filter": filt, "pageSize": 256},
             )
-            return (body or {}).get("entries", []) if isinstance(body, dict) else []
+            entries = (body or {}).get("entries", []) if isinstance(body, dict) else []
+            if entries:
+                return filt, entries
+        return filters[-1], []
 
-        entries = _retry_read(fetch, retry_on_empty=lambda e: not e)
-        if entries:
-            break
+    def ready(round_result: Any) -> bool:
+        _filt, entries = round_result
+        return {"service-a", "service-b"} <= {_entry_service(e) for e in entries}
+
+    (used_filter, entries), _ok = _poll_until(fetch_round, ready)
 
     services = sorted({svc for e in entries if (svc := _entry_service(e))})
     if {"service-a", "service-b"} <= set(services):
@@ -458,7 +521,7 @@ def check_cloud_logging(report: CorrelationReport, token: str, project: str, tra
     report.register(
         11,
         FAIL,
-        razon="no hay >=1 entrada por servicio para el trace inyectado",
+        razon="no hay >=1 entrada por servicio para el trace inyectado (deadline agotado)",
         detalles={"entradas": len(entries), "servicios": services, "filtro": used_filter},
     )
     return False
@@ -476,18 +539,22 @@ def _point_value(point: dict[str, Any]) -> float:
 def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, window: int) -> bool:
     """A12: the GMP counter ``orders_created_total`` grew inside ``window``.
 
-    The real metric type is discovered via a ``starts_with`` descriptor
+    v3 ``timeSeries.list`` takes the interval as ``interval.startTime`` /
+    ``interval.endTime`` and the metric as ``filter=metric.type="..."``
+    (a bare ``metric.type``/``interval`` query param is rejected — verified
+    live). The real metric type is discovered via a ``starts_with`` descriptor
     filter (the expected type is preferred when it exists). GMP delivers
     counters as cumulative points, so the increment per series is
-    last-first (a single point contributes its cumulative value, which is
-    >0 only if orders were created by that series' process). Returns True on
-    PASS.
+    last-first by ``endTime`` (a single point contributes its cumulative
+    value, which is >0 only if orders were created). Polls until the
+    increment shows up or the deadline expires. Returns True on PASS.
     """
     auth = {"Authorization": f"Bearer {token}"}
 
     descriptor_filter = 'metric.type=starts_with("prometheus.googleapis.com/orders_created")'
     desc_url = (
-        f"{DESCRIPTORS_URL}?{urllib.parse.urlencode({'filter': descriptor_filter, 'pageSize': '100'})}"
+        f"{DESCRIPTORS_URL.format(project=project)}?"
+        f"{urllib.parse.urlencode({'filter': descriptor_filter, 'pageSize': '100'})}"
     )
     _status, _headers, desc_body = http_request("GET", desc_url, headers=auth)
     types = (
@@ -513,43 +580,52 @@ def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, 
         )
         return False
 
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(seconds=window)
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    params = {
-        "metric.type": metric_type,
-        "interval": f"{start.strftime(fmt)}/{end.strftime(fmt)}",
-        "pageSize": "1000",
-    }
-    ts_url = f"{TIMESERIES_URL}?{urllib.parse.urlencode(params)}"
-    _status, _headers, ts_body = http_request("GET", ts_url, headers=auth)
-    series = (ts_body or {}).get("timeSeries", []) if isinstance(ts_body, dict) else []
+    def increment_over_window() -> tuple[float, int]:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(seconds=window)
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        params = {
+            "interval.startTime": start.strftime(fmt),
+            "interval.endTime": end.strftime(fmt),
+            "filter": f'metric.type="{metric_type}"',
+            "pageSize": "1000",
+        }
+        ts_url = f"{TIMESERIES_URL.format(project=project)}?{urllib.parse.urlencode(params)}"
+        _status, _headers, ts_body = http_request("GET", ts_url, headers=auth)
+        series = (ts_body or {}).get("timeSeries", []) if isinstance(ts_body, dict) else []
 
-    total_increment = 0.0
-    per_series: list[float] = []
-    for s in series if isinstance(series, list) else []:
-        points = sorted(
-            (s.get("points") or []),
-            key=lambda p: (p.get("interval") or {}).get("startTime", ""),
-        )
-        if not points:
-            continue
-        values = [_point_value(p) for p in points]
-        increment = values[-1] - values[0] if len(values) > 1 else values[0]
-        per_series.append(increment)
-        total_increment += increment
+        total_increment = 0.0
+        n_series = 0
+        for s in series if isinstance(series, list) else []:
+            points = sorted(
+                (s.get("points") or []),
+                key=lambda p: (p.get("interval") or {}).get("endTime", ""),
+            )
+            if not points:
+                continue
+            values = [_point_value(p) for p in points]
+            increment = values[-1] - values[0] if len(values) > 1 else values[0]
+            total_increment += increment
+            n_series += 1
+        return total_increment, n_series
+
+    (total_increment, n_series), _ok = _poll_until(
+        increment_over_window, ready=lambda r: r[0] > 0
+    )
 
     details = {
         "metric_type": metric_type,
         "ventana_segundos": window,
-        "series": len(per_series),
+        "series": n_series,
         "incremento_total": total_increment,
     }
     if total_increment > 0:
         report.register(12, PASS, detalles=details)
         return True
     report.register(
-        12, FAIL, razon="el contador orders_created_total no incremento en la ventana", detalles=details
+        12, FAIL,
+        razon="el contador orders_created_total no incremento en la ventana (deadline agotado)",
+        detalles=details,
     )
     return False
 
