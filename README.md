@@ -51,7 +51,7 @@ docker compose down          # conserva el volumen postgres_data
 docker compose down -v       # borra el volumen (reinicia el esquema desde init-scripts)
 ```
 
-## Arranque por capas (PLAN §1.A)
+## Arranque por capas (PLAN 1.A)
 
 ```powershell
 # núcleo: postgres + collector + service-a + service-b
