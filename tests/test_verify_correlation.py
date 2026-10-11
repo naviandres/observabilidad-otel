@@ -1,4 +1,4 @@
-"""Offline tests for the correlation verification framework (feature #23).
+"""Offline tests for the correlation verification framework.
 
 No network and no cloud: the script module is loaded from ``scripts/`` and
 its two I/O seams (``http_request`` and ``gcloud_access_token``) are replaced
@@ -96,7 +96,7 @@ def test_generate_traceparent_is_unique_per_call(vc):
 def test_required_failures_ignores_skip_and_pass(vc):
     report = vc.CorrelationReport()
     report.register(1, vc.PASS)
-    report.register(3, vc.SKIP, razon=vc.FEATURE6_SKIP_REASON)
+    report.register(3, vc.SKIP, razon=vc.AWS_CORRELATION_SKIP_REASON)
     report.register(10, vc.SKIP, razon=vc.GCP_SKIP_REASON)
     assert report.required_failures == []
     report.register(12, vc.FAIL, razon="cero incremento")
@@ -119,14 +119,14 @@ def test_local_mode_exits_zero_with_expected_skips(vc, monkeypatch, tmp_path):
     for assertion_id in range(3, 10):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
-        assert row["razon"] == "feature #6 (AWS)"
+        assert row["razon"] == "la pata AWS de la correlacion (despliegue AWS aun no disponible)"
     for assertion_id in (10, 11, 12):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
         assert "--include-gcp" in row["razon"]
     row13 = _assertion(payload, 13)
     assert row13["estado"] == "SKIP"
-    assert row13["razon"] == "AWS blocked (#1/#6)"
+    assert row13["razon"] == "despliegue AWS no disponible (cuenta en sandbox)"
 
 
 def test_evidence_json_schema_and_markdown_mirror(vc, monkeypatch, tmp_path):
@@ -148,7 +148,7 @@ def test_evidence_json_schema_and_markdown_mirror(vc, monkeypatch, tmp_path):
     md = (tmp_path / "03-correlation.md").read_text(encoding="utf-8")
     assert "| # | Aserción | Estado | Razón |" in md
     assert payload["trace_id"] in md
-    assert md.count("**SKIP**") == 11  # 3-9 (#6) + 10-12 (GCP off) + 13 (AWS blocked)
+    assert md.count("**SKIP**") == 11  # AWS-side (3-9) + GCP off (10-12) + cross-cloud (13)
     assert md.count("**PASS**") == 2
 
 
@@ -554,4 +554,4 @@ def test_include_aws_without_cli_data_skips(vc, monkeypatch, tmp_path):
     assert rc == 0
     row = _assertion(_read_payload(json_path), 13)
     assert row["estado"] == "SKIP"
-    assert "AWS blocked (#1/#6)" in row["razon"]
+    assert "despliegue AWS no disponible" in row["razon"]

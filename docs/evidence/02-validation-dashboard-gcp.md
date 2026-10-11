@@ -1,10 +1,10 @@
-# 02 — Sesión de validación humana de #22 (smoke + fault injection + auditoría de series GMP)
+# 02 — Validación del dashboard de Cloud Monitoring (smoke + fault injection + auditoría de series GMP)
 
 > **Fecha:** 2026-10-11 · **Proyecto:** `otel-lab-obs-2610` (número `797970839119`) ·
 > **Operador CLI:** `luismiguelossaarias05@gmail.com` (gcloud SDK 580.0.0, ADC OK) ·
 > **Rama del entregable:** `feat/22-fase3-dashboard-cloud-monitoring-gcp` (HEAD `8e12f0c`).
-> **Alcance:** evidencia de la validación humana post-revisión de la feature #22: el dashboard
-> `8ceea108-ca30-4d79-b18a-f4610bfc8f71` se valida **en vivo** con carga de
+> **Alcance:** evidencia de la validación humana, tras la revisión, del dashboard
+> `8ceea108-ca30-4d79-b18a-f4610bfc8f71`: se valida **en vivo** con carga de
 > tráfico real, inyección de fallo y auditoría de series en Google Managed Prometheus (GMP).
 > Formato tipo `00`/`01`: volcado CLI + datos declarados por el operador, sin capturas de pantalla.
 > Coste de la sesión: filas `create/delete/summary` de 16:56Z–17:41Z en `cluster-hours.csv`
@@ -91,7 +91,7 @@ kubectl -n otel-lab get --raw "/api/v1/namespaces/otel-lab/pods/otel-lab-collect
 | `otelcol_exporter_sent_metric_points` | **2576** | suma `googlecloud` + `googlemanagedprometheus` |
 | `otelcol_exporter_sent_log_records` | **130** | pipeline OTLP + `filelog` → Cloud Logging |
 
-**Verificación del fix `1cab22c` en clúster:** en el smoke #21b los `filelog` operators eran
+**Verificación del fix `1cab22c` en clúster:** en el smoke del despliegue GKE los `filelog` operators eran
 inválidos para contrib 0.162.0 y el pipeline de logs **no emitió registros (sent_log_records=0)**.
 Tras el fix (`parse_to: attributes` en `json_parser`; copia del chart re-sincronizada), el binario
 `otel/opentelemetry-collector-contrib:0.162.0` desplegado en el cluster C emite **130 registros**
@@ -133,9 +133,9 @@ Invoke-RestMethod -Headers @{Authorization="Bearer $tok"} -Uri (
 | Serie | Estado | Impacto en dashboard |
 |---|---|---|
 | `http_server_duration_milliseconds` (tipo `/histogram`) | **SÍ existe**, con datos de la sesión | paneles 1–3 en vivo (rps, error rate, latencia avg) |
-| `db_client_operation_duration_milliseconds_*` | **NO existe** | **desvío conocido del panel 4** (persiste desde #22: solo llega `db_client_connections_usage`; la query de duración va preparada para #23/#24) |
+| `db_client_operation_duration_milliseconds_*` | **NO existe** | **desvío conocido del panel 4** (persiste desde la validación del dashboard: solo llega `db_client_connections_usage`; la query de duración queda preparada para revalidarse en las próximas sesiones del cluster) |
 | `otelcol_*_total` (sent/refused) | **SÍ presentes** | panel 6 con datos |
-| `otelcol_exporter_send_failed_*` | **sin descriptor** | esperado: contadores con valor 0 no se exportan = healthy (limitación 4 documentada en `impl_22`) |
+| `otelcol_exporter_send_failed_*` | **sin descriptor** | esperado: contadores con valor 0 no se exportan = healthy (limitación 4 documentada en el propio dashboard) |
 
 ## 6. Teardown y estado final
 

@@ -2,7 +2,7 @@ apiVersion: v2
 name: otel-lab
 description: >-
   GKE Standard workloads for the dual-cloud OTel lab: service-a, service-b,
-  postgres and the otel-collector-gcp config (PLAN §2.B-GCP, feature #21).
+  postgres and the otel-collector-gcp config (PLAN §2.B-GCP, GKE deployment).
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

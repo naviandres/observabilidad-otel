@@ -1,4 +1,4 @@
-# Full local development stack (all-in-one) — the harness smoke-tests this file.
+# Full local development stack (all-in-one) — the lab's verification suite smoke-tests this file.
 #
 #   docker compose up --build -d          # from src/observabilidad-otel
 #

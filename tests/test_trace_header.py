@@ -1,6 +1,6 @@
 """service-a must echo the active W3C trace id in the ``x-trace-id`` header.
 
-PLAN §3.A assertion 2 (feature #23). Fully offline: the app is imported with
+PLAN §3.A assertion 2. Fully offline: the app is imported with
 ``OTEL_ENABLED=false`` (no OTLP exporter is created), then instrumented
 manually with ``FastAPIInstrumentor`` against the in-memory provider from
 ``conftest``, with service-b and the database replaced by stubs.

@@ -1,4 +1,4 @@
-# Makefile — ciclo de vida GCP (feature #21, PLAN §2.B-GCP/§3.5).
+# Makefile — ciclo de vida GCP (despliegue GKE, PLAN §2.B-GCP/§3.5).
 #
 # GUARDARRAILES (§3.5): el cluster GKE Standard cuesta $0.10/h de mgmt fee MAS
 # el nodo spot e2-small. Regla operativa: la sesion de nube se ENCIENDE para
@@ -50,7 +50,7 @@ gcp-start:
 	  --member="serviceAccount:$(GCP_PROJECT_ID).svc.id.goog[$(GCP_NAMESPACE)/$(COLLECTOR_K8S_SA)]"
 	@echo ">> kubeconfig"
 	$(GCLOUD) container clusters get-credentials $(GCP_CLUSTER) --location=$(GCP_ZONE)
-	@echo ">> PREREQUISITO #21b (no automatizado aqui): instalar el driver CSI"
+	@echo ">> PREREQUISITO (no automatizado aqui): instalar el driver CSI"
 	@echo "   secrets-store.csi.k8s.io + provider-gcp (helm repo external-secrets/cs-driver)"
 	@echo "   y dar SM secretAccessor al SA del addon: $(COLLECTOR_GCP_SA) ya lo tiene."
 
@@ -68,8 +68,8 @@ gcp-destroy:
 	@echo ">> cluster destruido y verificado (fee detenido)"
 
 # deploy-gcp — sincroniza la config del collector y el seed al chart (unica
-# fuente de verdad: deploy/collector/ + init-scripts/; el test del harness
-# exige bytes identicos) y hace helm upgrade --install.
+# fuente de verdad: deploy/collector/ + init-scripts/; la suite de
+# verificacion del laboratorio exige bytes identicos) y hace helm upgrade --install.
 deploy-gcp:
 	mkdir -p helm/otel-lab/files/init
 	cp deploy/collector/otel-collector-gcp.yaml helm/otel-lab/files/otel-collector-gcp.yaml

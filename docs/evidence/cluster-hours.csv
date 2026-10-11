@@ -2,8 +2,8 @@ date,cluster,action,timestamp_utc,hours,fee_usd_per_hour,subtotal_usd,notes
 2026-10-11,otel-lab-std,create,2026-10-11T03:52:00Z,,0.10,,GKE Standard zonal us-central1-a; node pool spot e2-small autoscaling 0-1; fee de control plano arranca al crear el cluster
 2026-10-11,otel-lab-std,delete,2026-10-11T14:16:00Z,,0.10,,teardown (gcloud container clusters delete) completado; clusters list = vacio; fee detenido
 2026-10-11,otel-lab-std,summary,2026-10-11T03:52:00Z/2026-10-11T14:16:00Z,10.4,0.10,1.04,uptime 10h24m (03:52Z->14:16Z) = 10.4h x $0.10/h fee plano = ~$1.04 USD; coste del nodo spot NO incluido en esta linea
-2026-10-11,otel-lab-std,create,2026-10-11T16:56:00Z,,0.10,,"validacion #22 (humano): zonal us-central1-a e2-small + update add-on CSI; 12x200 + fault injection 6x503; delete al detectar Insufficient cpu del system GKE 1.36"
+2026-10-11,otel-lab-std,create,2026-10-11T16:56:00Z,,0.10,,"validacion del dashboard (humano): zonal us-central1-a e2-small + update add-on CSI; 12x200 + fault injection 6x503; delete al detectar Insufficient cpu del system GKE 1.36"
 2026-10-11,otel-lab-std,delete,2026-10-11T17:16:00Z,,0.10,,fee detenido tras ~20m de sesion A
-2026-10-11,otel-lab-std,create,2026-10-11T17:24:00Z,,0.10,,"re-creo zona C e2-medium con add-on en create; valida #22 paneles y despues #23 verify_correlation --include-gcp (A1,2,10,11,12 PASS; 3-9 y 13 SKIP); imagen service-a:0.1.1 con header x-trace-id"
+2026-10-11,otel-lab-std,create,2026-10-11T17:24:00Z,,0.10,,"re-creo zona C e2-medium con add-on en create; valida los paneles del dashboard y despues la correlacion cross-signal (verify_correlation --include-gcp; A1,2,10,11,12 PASS; 3-9 y 13 SKIP); imagen service-a:0.1.1 con header x-trace-id"
 2026-10-11,otel-lab-std,delete,2026-10-11T19:05:00Z,,0.10,,teardown sesion B; fee detenido
-2026-10-11,otel-lab-std,summary,2026-10-11T16:56:00Z/2026-10-11T19:05:00Z,2.0,0.10,0.20,"uptime A 0.33h + B 1.68h = 2.0h x $0.10/h fee plano; sesiones de validacion #22 y #23; spot no incluido; create fallido por capacidad spot en us-central1-a no facturable"
+2026-10-11,otel-lab-std,summary,2026-10-11T16:56:00Z/2026-10-11T19:05:00Z,2.0,0.10,0.20,"uptime A 0.33h + B 1.68h = 2.0h x $0.10/h fee plano; sesiones de validacion del dashboard y de la correlacion cross-signal; spot no incluido; create fallido por capacidad spot en us-central1-a no facturable"

@@ -1,4 +1,4 @@
-"""Cross-signal correlation verification framework (PLAN §3.A, feature #23).
+"""Cross-signal correlation verification framework (PLAN §3.A).
 
 The script injects a known W3C ``traceparent`` into ``POST /orders`` and then
 asserts that the same ``trace_id`` shows up across the three observability
@@ -6,10 +6,10 @@ signals, in each cloud it was asked to check:
 
 * ``--include-gcp``  -> Cloud Trace (A10), Cloud Logging (A11), Cloud
   Monitoring via Google Managed Prometheus (A12).
-* ``--include-aws``  -> X-Ray cross-cloud check (A13). AWS is currently
-  sandboxed (#1/#6 blocked), so A13 SKIPs with an explicit reason until AWS
-  data exists. Assertions 3-9 belong to feature #6 and are registered as SKIP
-  with reason "feature #6 (AWS)".
+* ``--include-aws``  -> X-Ray cross-cloud check (A13). The AWS deployment is
+  not available yet (sandboxed account), so A13 SKIPs with an explicit reason
+  until AWS data exists. Assertions 3-9 belong to the AWS side of the
+  correlation and are registered as SKIP with the AWS-side reason below.
 
 Design constraints (PLAN §3.A): cost ≈ $0 — only read APIs inside free
 quotas, authentication via the ADC token of ``gcloud auth print-access-token``
@@ -105,8 +105,8 @@ ASSERTION_CATALOG: list[tuple[int, str, bool]] = [
     (13, "Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes", True),
 ]
 
-AWS_SKIP_REASON = "AWS blocked (#1/#6)"
-FEATURE6_SKIP_REASON = "feature #6 (AWS)"
+AWS_SKIP_REASON = "despliegue AWS no disponible (cuenta en sandbox)"
+AWS_CORRELATION_SKIP_REASON = "la pata AWS de la correlacion (despliegue AWS aun no disponible)"
 GCP_SKIP_REASON = "GCP no incluido (ejecutar con --include-gcp)"
 
 
@@ -633,7 +633,7 @@ def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, 
 def check_cross_cloud(report: CorrelationReport, include_aws: bool, gcp_trace_ok: bool, window: int) -> None:
     """A13: the same W3C trace shows up in AWS and GCP signals.
 
-    While AWS is sandboxed (#1/#6) there is no X-Ray data, so the assertion
+    While the AWS deployment is unavailable there is no X-Ray data, so the assertion
     SKIPs with an explicit reason. With ``--include-aws`` the X-Ray side is
     checked by structure (segments of service-a and service-b in the window),
     NOT by id equality: the awsxray exporter rewrites the 128-bit id (PLAN
@@ -719,7 +719,7 @@ def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
         check_response_trace_header(report, resp_headers, trace_id)
 
     for assertion_id in range(3, 10):
-        report.register(assertion_id, SKIP, razon=FEATURE6_SKIP_REASON)
+        report.register(assertion_id, SKIP, razon=AWS_CORRELATION_SKIP_REASON)
 
     gcp_trace_ok = False
     if args.include_gcp:
@@ -773,7 +773,7 @@ def write_evidence(payload: dict[str, Any], out_dir: Path) -> Path:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """CLI of the framework (PLAN §3.A + feature #23 brief)."""
+    """CLI of the framework (PLAN §3.A)."""
     parser = argparse.ArgumentParser(description="Verify W3C cross-signal correlation (PLAN §3.A)")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="base URL of service-a")
     parser.add_argument(
@@ -782,7 +782,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-aws", action="store_true",
-        help="run the X-Ray cross-cloud assertion (A13); SKIPs while #1/#6 are blocked",
+        help="run the X-Ray cross-cloud assertion (A13); SKIPs while the AWS deployment is unavailable",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help="GCP project id")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW_SECONDS, help="read window in seconds")
