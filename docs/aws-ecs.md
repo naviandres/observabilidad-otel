@@ -53,6 +53,12 @@ make aws-verify                    # verify_correlation.py --include-aws contra 
 #    (equivalente a mano: python scripts/verify_correlation.py
 #     --endpoint http://<IP_TASK>:8000 --include-aws
 #     --prometheus-url http://<IP_TASK>:8889/metrics)
+#    OJO (verificado en vivo 2026-10-12): con aws-cli 2.32.x/botocore 1.43 los
+#    details de los attachments de ECS salen en camelCase (`name`/`value`), y el
+#    JMESPath `.Value` de la resolucion de IP falla -> `make aws-verify` NO
+#    resuelve la IP en ese entorno. Camino real usado en la sesion: resolver
+#    `Association.PublicIp` con boto3 (o `ec2 describe-network-interfaces`) y
+#    lanzar verify_correlation.py a mano contra esa IP.
 make aws-access-revoke             # scripts/access.ps1 -Action Revoke (SG vuelve a 0 ingress)
 
 # 4) smoke: POST http://<IP_TASK>:8000/orders (con la regla grant activa)
@@ -135,7 +141,11 @@ contratos quedan fijados por `tests/test_ecs_deliverable.py`:
   corresponde al humano de la Fase 0). Con `assignPublicIp=ENABLED` el ENI de
   la task **sí** recibe IP pública, pero `ecs describe-tasks` **no** la lista:
   sale en `ec2 describe-network-interfaces → Association.PublicIp` (verificado
-  en vivo 2026-10-12; `make aws-verify` la resuelve así).
+  en vivo 2026-10-12). Con aws-cli ≥2.32/botocore ≥1.43 los `attachments[].details`
+  vienen en camelCase (`name`/`value`), por lo que la lectura JMESPath `.Value`
+  de `make aws-verify`/`access.ps1 Grant` puede no resolver la IP en ese entorno
+  (regresión documentada en `progress/impl_6_correlacion_aws.md`, ronda 5); el
+  camino real usado en la sesión dual fue resolver la IP con boto3 directamente.
 
 ### Contratos de la segunda sesión (ronda 2, 2026-10-12)
 
