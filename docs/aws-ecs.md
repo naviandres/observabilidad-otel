@@ -45,6 +45,12 @@ make aws-start
 
 # 3) disponer del túnel (EC2 → SSM Session Manager → ECS Exec):
 make tunnel                        # service-a:8000, service-b:8001, collector 4317
+#    modo Task (documento AWS-StartPortForwardingSessionForRemoteSession,
+#    target = taskId plano; el netns awsvpc alcanza cualquier puerto de la
+#    task, incluidos los no declarados en portMappings):
+pwsh -File scripts/tunnel.ps1 -Mode Task -TaskPorts 8000,8889
+#    → 8889 = exporter prometheus del collector, lectura local de A8/A9 de
+#    la verificacion de correlacion (scrape con exemplars + series)
 
 # 4) smoke: POST localhost:8000/orders → traza en X-Ray, logs en CloudWatch
 
