@@ -779,14 +779,22 @@ def check_cloud_trace(report: CorrelationReport, token: str, project: str, trace
 def _entry_service(entry: dict[str, Any]) -> str | None:
     """Attribute a Cloud Logging entry to service-a/service-b.
 
-    Three shapes, in order of preference (all verified against the live
-    project on 2026-10-11): the k8s_container label set (OTLP path), the
-    structlog ``name``/``logger`` in jsonPayload, and the structlog JSON
-    line kept as text by the filelog pipeline (``"logger": "service-a"``
-    inside ``textPayload``).
+    Four shapes, in order of preference (all verified against the live
+    project; la forma OTLP confirmada en vivo 2026-10-12 Ronda 6): the entry
+    ``labels["service.name"]`` written by the googlecloud exporter from the
+    OTLP resource (the ``LoggingHandler`` path — body is the plain message as
+    ``textPayload``, no k8s labels, no ``jsonPayload``), the k8s_container
+    label set, the structlog ``name``/``logger`` in jsonPayload, and the
+    structlog JSON line kept as text by the filelog pipeline (``"logger":
+    "service-a"`` inside ``textPayload``).
     """
     labels = (entry.get("resource") or {}).get("labels") or {}
-    svc = labels.get("container_name") or (entry.get("jsonPayload") or {}).get("name")
+    entry_labels = entry.get("labels") or {}
+    svc = (
+        labels.get("container_name")
+        or entry_labels.get("service.name")
+        or (entry.get("jsonPayload") or {}).get("name")
+    )
     if svc in {"service-a", "service-b"}:
         return str(svc)
     payload_logger = (entry.get("jsonPayload") or {}).get("logger")
@@ -802,22 +810,40 @@ def _entry_service(entry: dict[str, Any]) -> str | None:
     return None
 
 
+LOGGING_LOOKBACK_SECONDS = 900
+
+
+def _logging_filters(project: str, trace_id: str) -> list[str]:
+    """A11/A13 chain of Cloud Logging filters, in preference order.
+
+    Ronda 6 (2026-10-12, verificado en vivo): ``entries:list`` devuelve 0
+    resultados de forma intermitente para filtros estructurados (``trace:`` /
+    ``jsonPayload.``) SIN cota inferior de ``timestamp`` — la misma consulta
+    con ``timestamp>=...`` encuentra las entradas. La cota (15 min hacia
+    atras) cubre de sobra la duracion de la corrida y el lag de ingesta.
+    """
+    since = f'timestamp>="{(datetime.now(timezone.utc) - timedelta(seconds=LOGGING_LOOKBACK_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")}" AND '
+    return [
+        since + f'trace:"projects/{project}/traces/{trace_id}"',
+        since + f'jsonPayload.trace_id="{trace_id}"',
+        since + f'textPayload:"{trace_id}"',
+    ]
+
+
 def check_cloud_logging(report: CorrelationReport, token: str, project: str, trace_id: str) -> bool:
     """A11: Cloud Logging holds ≥1 entry per service carrying the trace id.
 
-    Filter chain (first one that yields entries wins): the normalized
-    ``trace`` field (``transform/logs`` writes
-    ``logging.googleapis.com/trace``), ``jsonPayload.trace_id``, and the
-    raw ``textPayload`` substring — the filelog pipeline lands the structlog
-    JSON as text without a normalized trace field (verified live). Polls
-    until both services appear or the deadline expires. Returns True on PASS.
+    Filter chain (first one that yields entries wins, all bounded by a
+    timestamp floor — see :func:`_logging_filters`): the normalized ``trace``
+    field (``transform/logs`` writes ``logging.googleapis.com/trace`` and the
+    OTLP ``LoggingHandler`` path lands it with ``labels["service.name"]``),
+    ``jsonPayload.trace_id``, and the raw ``textPayload`` substring — the
+    filelog pipeline lands the structlog JSON as text without a normalized
+    trace field (verified live). Polls until both services appear or the
+    deadline expires. Returns True on PASS.
     """
     auth = {"Authorization": f"Bearer {token}"}
-    filters = [
-        f'trace:"projects/{project}/traces/{trace_id}"',
-        f'jsonPayload.trace_id="{trace_id}"',
-        f'textPayload:"{trace_id}"',
-    ]
+    filters = _logging_filters(project, trace_id)
 
     def fetch_round() -> tuple[str, list[dict[str, Any]]]:
         """Try every filter once; return the first non-empty (filter, entries)."""
@@ -864,17 +890,31 @@ def _point_value(point: dict[str, Any]) -> float:
     return 0.0
 
 
-def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, window: int) -> bool:
+def check_cloud_monitoring(
+    report: CorrelationReport,
+    token: str,
+    project: str,
+    window: int,
+    run_started: datetime,
+) -> bool:
     """A12: the GMP counter ``orders_created_total`` grew inside ``window``.
 
     v3 ``timeSeries.list`` takes the interval as ``interval.startTime`` /
     ``interval.endTime`` and the metric as ``filter=metric.type="..."``
     (a bare ``metric.type``/``interval`` query param is rejected — verified
-    live). The real metric type is discovered via a ``starts_with`` descriptor
-    filter (the expected type is preferred when it exists). GMP delivers
-    counters as cumulative points, so the increment per series is
-    last-first by ``endTime`` (a single point contributes its cumulative
-    value, which is >0 only if orders were created). Polls until the
+    live; v3 also rejects ``aggregation.*`` params). The real metric type is
+    discovered via a ``starts_with`` descriptor filter (the expected type is
+    preferred when it exists).
+
+    Ronda 6 (2026-10-12, verificado en vivo): GMP entrega los counters como
+    puntos CUMULATIVOS — ``interval.startTime`` fijo en la creacion del
+    contador y ``value`` = total desde entonces, repetido en cada reporte de
+    los 60 s. El old ``last-first`` dentro de una ventana deslizante daba 0
+    cuando el incremento ocurrio antes del primer punto de la ventana (el
+    reader a 60 s no produce el punto de transicion 0→1). El incremento de la
+    corrida es: (ultimo punto con endTime >= run_started) - (ultimo punto con
+    endTime < run_started, 0 si el contador nacio en la ventana); las series
+    sin puntos dentro de la ventana (pods viejos) no cuentan. Polls until the
     increment shows up or the deadline expires. Returns True on PASS.
     """
     auth = {"Authorization": f"Bearer {token}"}
@@ -910,8 +950,11 @@ def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, 
 
     def increment_over_window() -> tuple[float, int]:
         end = datetime.now(timezone.utc)
-        start = end - timedelta(seconds=window)
+        # Margen hacia atras para atrapar el ultimo reporte previo a la corrida
+        # (baseline). El reader exporta cada <=window s, 180 s sobra.
+        start = run_started - timedelta(seconds=180)
         fmt = "%Y-%m-%dT%H:%M:%SZ"
+        run_started_iso = run_started.strftime(fmt)
         params = {
             "interval.startTime": start.strftime(fmt),
             "interval.endTime": end.strftime(fmt),
@@ -929,10 +972,20 @@ def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, 
                 (s.get("points") or []),
                 key=lambda p: (p.get("interval") or {}).get("endTime", ""),
             )
-            if not points:
+            within = [
+                p for p in points
+                if (p.get("interval") or {}).get("endTime", "") >= run_started_iso
+            ]
+            if not within:
+                # Serie sin reportes dentro de la ventana (pod viejo): no
+                # contribuye ni resta.
                 continue
-            values = [_point_value(p) for p in points]
-            increment = values[-1] - values[0] if len(values) > 1 else values[0]
+            before = [
+                p for p in points
+                if (p.get("interval") or {}).get("endTime", "") < run_started_iso
+            ]
+            baseline = _point_value(before[-1]) if before else 0.0
+            increment = max(_point_value(within[-1]) - baseline, 0.0)
             total_increment += increment
             n_series += 1
         return total_increment, n_series
@@ -980,11 +1033,7 @@ def _gcp_trace_id_present(token: str, project: str, trace_id: str) -> tuple[bool
     except HttpError as exc:
         if exc.status != 404:
             raise
-    for filt in (
-        f'trace:"projects/{project}/traces/{trace_id}"',
-        f'jsonPayload.trace_id="{trace_id}"',
-        f'textPayload:"{trace_id}"',
-    ):
+    for filt in _logging_filters(project, trace_id):
         _status, _headers, body = http_request(
             "POST",
             LOGGING_LIST_URL,
@@ -1637,6 +1686,11 @@ def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
     """Execute the whole catalog once and return the report + injected id."""
     report = CorrelationReport()
     traceparent, trace_id = generate_traceparent()
+    # Ronda 6 (A12): ancla temporal de la corrida. Los puntos GMP del counter
+    # son cumulative (value = total desde la creacion del contador), asi que
+    # el incremento de la ventana se mide contra el ultimo punto ANTES de
+    # este instante, no last-first dentro de una ventana deslizante.
+    run_started = datetime.now(timezone.utc)
 
     resp_headers = check_traceparent_injection(report, args.endpoint, traceparent)
     if resp_headers is None:
@@ -1661,7 +1715,7 @@ def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
         else:
             _run_gcp_check(report, 10, check_cloud_trace, gcp_token, args.project, trace_id)
             _run_gcp_check(report, 11, check_cloud_logging, gcp_token, args.project, trace_id)
-            _run_gcp_check(report, 12, check_cloud_monitoring, gcp_token, args.project, args.window)
+            _run_gcp_check(report, 12, check_cloud_monitoring, gcp_token, args.project, args.window, run_started)
     else:
         for assertion_id in (10, 11, 12):
             report.register(assertion_id, SKIP, razon=GCP_SKIP_REASON)
