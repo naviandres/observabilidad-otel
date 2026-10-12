@@ -17,7 +17,9 @@ RENDERED_FIXTURE = ROOT / "tests" / "data" / "aws" / "task-definition.json"
 COLLECTOR_AWS_YAML = ROOT / "deploy" / "collector" / "otel-collector-aws.yaml"
 MAKEFILE = ROOT / "Makefile"
 GITIGNORE = ROOT / ".gitignore"
+ACCESS = ROOT / "scripts" / "access.ps1"
 TUNNEL = ROOT / "scripts" / "tunnel.ps1"
+POSTGRES_DOCKERFILE = ROOT / "deploy" / "aws" / "postgres.Dockerfile"
 DOCS = ROOT / "docs" / "aws-ecs.md"
 IAM_TASK_ROLE = ROOT / "deploy" / "aws" / "iam" / "task-role-policy.json"
 
@@ -59,10 +61,13 @@ def test_no_latest_tags_anywhere():
     tag_re = re.compile(r":latest\b")
     for c in _containers(td).values():
         assert not tag_re.search(c["image"]), f"{c['name']} usa :latest"
-    # postgres y cw-agent son publicos fijados; los propios usan __IMAGE_TAG__
-    collector = _containers(td)["otel-collector"]
-    assert "__IMAGE_TAG__" in collector["image"]
-    assert collector["essential"] is True
+    # las 4 imagenes propias (app x2, collector y postgres con seed horneado)
+    # salen de ECR con __IMAGE_TAG__; solo el cloudwatch-agent es publico fijado
+    for name in ("otel-collector", "postgres"):
+        container = _containers(td)[name]
+        assert "__IMAGE_TAG__" in container["image"], f"{name} no usa el tag renderizado"
+        assert "__ECR_REGISTRY__" in container["image"], f"{name} no sale de ECR"
+    assert _containers(td)["otel-collector"]["essential"] is True
 
 
 def test_port_mappings_of_app_services():
@@ -167,6 +172,49 @@ def test_postgres_volume_and_healthcheck():
     assert any(v["name"] == "postgres-data" for v in _task_def()["volumes"])
 
 
+def test_postgres_env_matches_compose_and_init_scripts():
+    """El live run 2026-10-12 rompio por mismatch: el template creaba el rol
+    `otel-lab`/DB `otel` mientras compose+init-scripts usan `postgres`/`orders`
+    (y service-b vive en la DB `inventory`). El template debe coincidir con la
+    semilla horneada en la imagen propia."""
+    pg = _containers(_task_def())["postgres"]
+    env = {e["name"]: e["value"] for e in pg["environment"]}
+    assert env["POSTGRES_USER"] == "postgres", "rol distinto del que crea compose/init-scripts"
+    assert env["POSTGRES_DB"] == "orders", "DB distinta de la que siembra 01-orders-schema.sql"
+    assert "pg_isready -U postgres -d orders" in " ".join(pg["healthCheck"]["command"])
+    # alineacion con docker-compose.yml (fuente de verdad del seed local)
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "POSTGRES_USER: postgres" in compose
+    assert "POSTGRES_DB: orders" in compose
+    # service-b apunta a la DB inventory (init-scripts/02-inventory-db.sql)
+    assert "5432/inventory" in compose
+
+
+def test_postgres_image_is_internal_with_baked_seed():
+    """Fargate no admite bind-mount: postgres sale de ECR con init-scripts
+    horneados, no de la imagen publica pelada (sesion viva 2026-10-12)."""
+    td = _task_def()
+    pg = _containers(td)["postgres"]
+    assert pg["image"].endswith("/otel-lab/postgres:__IMAGE_TAG__")
+    assert "public.ecr.aws/docker/library/postgres" not in json.dumps(td)
+    dockerfile = (ROOT / "deploy" / "aws" / "postgres.Dockerfile").read_text(encoding="utf-8")
+    assert "FROM public.ecr.aws/docker/library/postgres:16-alpine" in dockerfile
+    assert re.search(r"COPY\s+\.\s+/docker-entrypoint-initdb\.d/", dockerfile)
+
+
+def test_aws_push_builds_four_images():
+    """aws-push construye+pushea las 4 imagenes propias (service-a, service-b,
+    otel-collector y postgres con seed), nunca la imagen publica pelada."""
+    text = MAKEFILE.read_text(encoding="utf-8")
+    block = text.split("aws-push:")[-1].split("\n# ")[0]
+    built = re.findall(r"docker build -t \S+/otel-lab/([a-z-]+):", block)
+    assert sorted(built) == ["otel-collector", "postgres", "service-a", "service-b"]
+    pushed = re.findall(r"docker push \S+/otel-lab/([a-z-]+):", block)
+    assert sorted(pushed) == ["otel-collector", "postgres", "service-a", "service-b"]
+    assert "deploy/aws/postgres.Dockerfile" in block
+    assert "init-scripts" in block
+
+
 def test_rendered_fixture_matches_template():
     """El fixture tests/data/aws es exactamente el template con tokens resueltos:
     lo que `make aws-start` enviara a register-task-definition."""
@@ -190,9 +238,12 @@ def test_makefile_exposes_aws_lifecycle_targets():
     targets = set(re.findall(r"^([a-z][a-z-]+):", text, re.M))
     required = {
         "aws-net-create", "aws-net-destroy", "aws-push", "aws-start",
-        "aws-stop", "aws-destroy", "tunnel", "validate-collector",
+        "aws-stop", "aws-destroy", "aws-access-grant", "aws-access-revoke",
+        "aws-verify", "validate-collector",
     }
     assert required <= targets
+    # el target `tunnel` murio con la sesion viva: SSM no porta-forward a Fargate
+    assert "tunnel" not in targets
     assert re.search(r"^IMAGE_TAG\s+\?=\s+0\.1\.0\s*$", text, re.M)
     # Ninguna imagen construida/pusheada usa :latest (los comentarios del
     # Makefile SI mencionan la palabra, asi que se mira el contexto de comando).
@@ -208,10 +259,24 @@ def test_collector_yaml_aws_targets_aws_backends():
     assert "resourcedetection" in text and "ecs" in text
 
 
-def test_tunnel_and_docs_present():
-    assert TUNNEL.exists()
-    assert DOCS.exists()
-    assert "awslogs" in DOCS.read_text(encoding="utf-8")
+def test_access_helper_replaces_broken_tunnel():
+    """La sesion viva 2026-10-12 demostro que SSM port-forwarding a Fargate NO
+    existe: tunnel.ps1 se retira y access.ps1 (grant/revoke /32) lo sustituye."""
+    assert not TUNNEL.exists(), "tunnel.ps1 roto debe estar retirado"
+    assert ACCESS.exists()
+    text = ACCESS.read_text(encoding="utf-8")
+    assert "api4.ipify.org" in text, "access.ps1 debe autodetectar la IPv4 del operador"
+    assert '/32' in text, "la regla debe limitarse al /32 del operador"
+    assert "authorize-security-group-ingress" in text
+    assert "revoke-security-group-ingress" in text
+    assert "DESVIACION" in text.upper(), "access.ps1 debe imprimir la desviacion del PLAN"
+    assert "AWS-StartPortForwardingSessionForRemoteSession" not in text
+    assert "AWS-StartPortForwardingSessionForECS" not in text
+    # docs reflejan el flujo grant/verify/revoke, no el tunel roto
+    docs_text = DOCS.read_text(encoding="utf-8")
+    assert "aws-access-grant" in docs_text and "aws-access-revoke" in docs_text
+    assert "aws-verify" in docs_text
+    assert "awslogs" in docs_text
     rendered_ignored = "task-definition.rendered.json" in GITIGNORE.read_text(encoding="utf-8")
     assert rendered_ignored
 
@@ -288,8 +353,8 @@ def test_docs_have_no_internal_jargon():
 def test_no_secrets_in_versioned_aws_artifacts():
     """Codigo versionado sin credenciales: nada de AKIA ni claves privadas."""
     files = [
-        TASK_DEF, COLLECTOR_AWS_YAML, MAKEFILE, TUNNEL, DOCS,
-        GITIGNORE, RENDERED_FIXTURE,
+        TASK_DEF, COLLECTOR_AWS_YAML, MAKEFILE, ACCESS, POSTGRES_DOCKERFILE,
+        DOCS, GITIGNORE, RENDERED_FIXTURE,
     ]
     secret_patterns = [
         re.compile(r"AKIA[0-9A-Z]{16}"),

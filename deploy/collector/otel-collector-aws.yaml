@@ -133,7 +133,8 @@ exporters:
     region: ${env:AWS_REGION}
     log_group_name: "/otel/labs/ecs-cluster/{ServiceName}"
     log_stream_name: "{TaskId}"
-  # 4/7 Prometheus local (:8889/metrics, scrapeable via the SSM tunnel).
+  # 4/7 Prometheus local (:8889/metrics; en AWS se alcanza por la IP publica
+  # del ENI del task tras `make aws-access-grant` — SSM no porta-forward).
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: otel

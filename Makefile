@@ -54,13 +54,18 @@ AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
 
 .PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp gcp-expose port-gcp port-jaeger-gcp \
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
-        tunnel validate-collector \
+        aws-access-grant aws-access-revoke aws-verify validate-collector \
         verify-correlation verify-correlation-gcp verify-correlation-aws \
         verify-correlation-dual
 
 # gcp-start — cluster GKE Standard ZONAL us-central1-a, release channel regular,
-# 1 nodo spot e2-small con autoscaling 0-1, private Google Access (SIN Cloud
-# NAT, lista negra §3.2) y Workload Identity. Coste: fee $0.10/h + spot e2-small.
+# nodo SPOT con autoscaling 0-3. Perfil: e2-MEDIUM (sesiones vivas: e2-small no
+# cabe — los system pods de GKE >= 1.36 consumen ~856m y el add-on CSI pide su
+# propio espacio; ver README "Nota de perfil"). Coste: fee $0.10/h de mgmt +
+# spot (peor caso 3 x e2-medium ~ $0.04/h; el autoscaler baja a 0 en idle).
+# El add-on Secret Manager CSI va EN EL CREATE (--enable-secret-manager): asi
+# los pods montan pg-password sin el paso manual del driver (update sobre
+# cluster existente tarda ~40 min en UPGRADE_NODES, observado 2026-10-11).
 gcp-start:
 	@echo ">> VPC $(GCP_NETWORK) + subnet $(GCP_SUBNET) (private Google Access ON, sin NAT)"
 	$(GCLOUD) compute networks describe $(GCP_NETWORK) >/dev/null 2>&1 \
@@ -69,13 +74,14 @@ gcp-start:
 	  || $(GCLOUD) compute networks subnets create $(GCP_SUBNET) \
 	       --network=$(GCP_NETWORK) --region=$(GCP_REGION) \
 	       --range=10.40.0.0/20 --enable-private-ip-google-access
-	@echo ">> cluster $(GCP_CLUSTER) (zonal $(GCP_ZONE), regular channel, spot e2-small 0-1) — fee $0.10/h"
+	@echo ">> cluster $(GCP_CLUSTER) (zonal $(GCP_ZONE), regular channel, spot e2-medium 0-3, add-on secret-manager) — fee $0.10/h"
 	$(GCLOUD) container clusters describe $(GCP_CLUSTER) --location=$(GCP_ZONE) >/dev/null 2>&1 \
 	  || $(GCLOUD) container clusters create $(GCP_CLUSTER) \
 	       --location=$(GCP_ZONE) \
 	       --release-channel=regular \
-	       --machine-type=e2-small --num-nodes=1 --spot \
-	       --enable-autoscaling --min-nodes=0 --max-nodes=1 \
+	       --machine-type=e2-medium --num-nodes=1 --spot \
+	       --enable-autoscaling --min-nodes=0 --max-nodes=3 \
+	       --enable-secret-manager \
 	       --network=$(GCP_NETWORK) --subnetwork=$(GCP_SUBNET) \
 	       --workload-pool=$(GCP_PROJECT_ID).svc.id.goog --no-enable-basic-auth --no-enable-legacy-authorization
 	@echo ">> Workload Identity binding: $(COLLECTOR_GCP_SA) <- $(GCP_NAMESPACE)/$(COLLECTOR_K8S_SA)"
@@ -84,9 +90,10 @@ gcp-start:
 	  --member="serviceAccount:$(GCP_PROJECT_ID).svc.id.goog[$(GCP_NAMESPACE)/$(COLLECTOR_K8S_SA)]"
 	@echo ">> kubeconfig"
 	$(GCLOUD) container clusters get-credentials $(GCP_CLUSTER) --location=$(GCP_ZONE)
-	@echo ">> PREREQUISITO (no automatizado aqui): instalar el driver CSI"
-	@echo "   secrets-store.csi.k8s.io + provider-gcp (helm repo external-secrets/cs-driver)"
-	@echo "   y dar SM secretAccessor al SA del addon: $(COLLECTOR_GCP_SA) ya lo tiene."
+	@echo ">> add-on CSI Secret Manager: creado CON el cluster (--enable-secret-manager)."
+	@echo "   Si el cluster ya existia sin el add-on: gcloud container clusters update"
+	@echo "   $(GCP_CLUSTER) --location=$(GCP_ZONE) --enable-secret-manager (~40 min UPGRADE_NODES)."
+	@echo "   SM secretAccessor sobre $(COLLECTOR_GCP_SA): ya concedido (Fase 0)."
 
 # gcp-stop — escala el pool a 0 (deja de correr el nodo spot; el fee $0.10/h
 # del cluster SIGUE corriendo: usa gcp-destroy fuera de la sesion de trabajo).
@@ -154,8 +161,9 @@ port-jaeger-gcp:
 # ===========================================================================
 
 # aws-net-create — VPC + subnet publica + IGW + route table + SG SIN ingress
-# (D5/§3.2: acceso humano solo por túnel SSM). Idempotente: descubre por tag.
-# Sin NAT Gateway ni VPC endpoints (lista negra §3.2).
+# (D5/§3.2: el acceso humano es por regla /32 temporal, `make aws-access-grant`;
+# SSM port-forwarding a Fargate NO existe, ver aws-access-grant). Idempotente:
+# descubre por tag. Sin NAT Gateway ni VPC endpoints (lista negra §3.2).
 aws-net-create:
 	@vpc=$$($(AWS) ec2 describe-vpcs --filters "Name=tag:Name,Values=$(NET_NAME)" --query 'Vpcs[0].VpcId' --output text); \
 	if [ "$$vpc" = "None" ] || [ -z "$$vpc" ]; then \
@@ -187,7 +195,7 @@ aws-net-create:
 	fi; \
 	sg=$$($(AWS) ec2 describe-security-groups --filters "Name=tag:Name,Values=$(NET_NAME)-task" --query 'SecurityGroups[0].GroupId' --output text); \
 	if [ "$$sg" = "None" ] || [ -z "$$sg" ]; then \
-	  sg=$$($(AWS) ec2 create-security-group --group-name $(NET_NAME)-task --description "otel-lab ECS task, no ingress (SSM tunnel only)" --vpc-id $$vpc --query 'GroupId' --output text); \
+	  sg=$$($(AWS) ec2 create-security-group --group-name $(NET_NAME)-task --description "otel-lab ECS task, no ingress (access via /32 grant)" --vpc-id $$vpc --query 'GroupId' --output text); \
 	  $(AWS) ec2 create-tags --resources $$sg --tags Key=Name,Value=$(NET_NAME)-task; \
 	fi; \
 	echo ">> sg=$$sg (sin reglas de ingress)"
@@ -208,8 +216,10 @@ aws-net-destroy:
 	$(AWS) ec2 delete-vpc --vpc-id $$vpc; \
 	echo ">> red $(NET_NAME) destruida"
 
-# aws-push — login en ECR + build + push de las 3 imagenes (service-a, service-b
-# y el collector ADOT con el YAML horneado). Tags fijos, nunca :latest (C3).
+# aws-push — login en ECR + build + push de las 4 imagenes propias (service-a,
+# service-b, el collector ADOT con el YAML horneado y postgres con el seed
+# init-scripts horneado — Fargate no admite bind-mount, ver
+# deploy/aws/postgres.Dockerfile). Tags fijos, nunca :latest (C3).
 aws-push:
 	@echo ">> ECR login ($(ECR_REGISTRY))"
 	$(AWS) ecr get-login-password | docker login --username AWS --password-stdin $(ECR_REGISTRY)
@@ -219,6 +229,8 @@ aws-push:
 	docker push $(ECR_REGISTRY)/otel-lab/service-b:$(IMAGE_TAG)
 	docker build -t $(ECR_REGISTRY)/otel-lab/otel-collector:$(IMAGE_TAG) -f deploy/collector/otelcol-contrib.dockerfile deploy/collector
 	docker push $(ECR_REGISTRY)/otel-lab/otel-collector:$(IMAGE_TAG)
+	docker build -t $(ECR_REGISTRY)/otel-lab/postgres:$(IMAGE_TAG) -f deploy/aws/postgres.Dockerfile init-scripts
+	docker push $(ECR_REGISTRY)/otel-lab/postgres:$(IMAGE_TAG)
 
 # aws-start — red + cluster (si falta) + task definition render/register +
 # service FARGATE desired_count=1 con assignPublicIp efimero (R-06) y ECS Exec.
@@ -261,10 +273,32 @@ aws-destroy:
 	  || (echo "ERROR: cluster $(ECS_CLUSTER) sigue vivo"; exit 1)
 	@echo ">> ECS destruido y verificado (sin computo). Ejecuta 'make aws-net-destroy' si quieres borrar la red"
 
-# tunnel — acceso SIN ingress publico (C4/§2.B): port-forwarding SSM via
-# scripts/tunnel.ps1. Requiere session-manager-plugin en el PATH.
-tunnel:
-	pwsh -NoProfile -File scripts/tunnel.ps1 -Cluster $(ECS_CLUSTER) -Service $(ECS_SERVICE) -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
+# aws-access-grant / aws-access-revoke — acceso al task SIN ingress permanente
+# (C4/§2.B). DESVIACION documentada del PLAN: SSM NO soporta port-forwarding a
+# tasks Fargate (todos los documentos/targets ECS de start-session fueron
+# rechazados en vivo 2026-10-12 con "Invalid target ID format"; ECS Exec solo
+# da shell via execute-command). El sustituto real: scripts/access.ps1 anade
+# una regla ingress TEMPORAL TCP /32 limitada a la IP publica del operador
+# (autodetectada via api4.ipify.org) y la revoca al terminar. Steady-state:
+# el SG sigue SIN ninguna regla de ingress (R-10).
+aws-access-grant:
+	pwsh -NoProfile -File scripts/access.ps1 -Action Grant -Region $(AWS_REGION) -Profile $(AWS_PROFILE) -Cluster $(ECS_CLUSTER) -Service $(ECS_SERVICE)
+
+aws-access-revoke:
+	pwsh -NoProfile -File scripts/access.ps1 -Action Revoke -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
+
+# aws-verify — corrida AWS (A1-A9) contra la IP PUBLICA del ENI de la task
+# (describe-tasks no la lista; sale en describe-network-interfaces ->
+# Association.PublicIp, verificado en vivo). Requiere la regla de
+# aws-access-grant activa para el /32 desde el que se corre.
+aws-verify:
+	@task=$$($(AWS) ecs list-tasks --cluster $(ECS_CLUSTER) --service-name $(ECS_SERVICE) --desired-status RUNNING --query 'taskArns[0]' --output text); \
+	 if [ "$$task" = "None" ] || [ -z "$$task" ]; then echo "ERROR: no hay task RUNNING (make aws-start)"; exit 1; fi; \
+	 eni=$$($(AWS) ecs describe-tasks --cluster $(ECS_CLUSTER) --tasks $$task --query 'tasks[0].attachments[0].details[?Name==`networkInterfaceId`].value | [0]' --output text); \
+	 ip=$$($(AWS) ec2 describe-network-interfaces --network-interface-ids $$eni --query 'NetworkInterfaces[0].Association.PublicIp' --output text); \
+	 if [ "$$ip" = "None" ] || [ -z "$$ip" ]; then echo "ERROR: la task no tiene IP publica en el ENI $$eni"; exit 1; fi; \
+	 echo ">> task publica: $$ip (endpoint :8000, scrape :8889)"; \
+	 $(PYTHON) scripts/verify_correlation.py --endpoint http://$$ip:8000 --include-aws --prometheus-url http://$$ip:8889/metrics
 
 # validate-collector — PLAN §2.C: el binario ADOT (v0.46.0) NO tiene subcomando
 # `validate`; se valida por ARRANQUE limpio ("Everything is ready" == exit 0).
@@ -305,7 +339,8 @@ validate-collector:
 #   verify-correlation-aws      + X-Ray/CloudWatch (boto3, perfil otel-lab)
 #   verify-correlation-dual     ambas banderas: evalua la asercion cruzada A13
 # El scrape Prometheus de A8/A9 va a --prometheus-url (default :8889): en la
-# sesion AWS se alcanza via `make tunnel` (modo Task), no via compose.
+# sesion AWS se alcanza por la IP publica del ENI de la task tras
+# `make aws-access-grant` (usa `make aws-verify`, que ya resuelve la IP).
 # ===========================================================================
 
 verify-correlation:
