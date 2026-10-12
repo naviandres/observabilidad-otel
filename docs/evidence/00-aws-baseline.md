@@ -41,6 +41,16 @@
 en el volumen del lab. Los consumos reales previstos de los $100 son **horas de task Fargate**
 (sección 10), **ingest de CloudWatch Logs / X-Ray** (acotados por C2/C3 del PLAN) y **egress mínimo**.
 
+> **Facturación — consolidated billing (2026-10-11).** La cuenta `621236283643` es **miembro** de la
+> organización `o-mjga20juxh`; con **consolidated billing** su gasto se factura a la cuenta
+> **management/pagadora `070443470565`**, que posee **créditos promocionales del pagador (~$120)** que
+> cubren el gasto consolidado. Por eso la cuenta miembro **no muestra créditos propios** (comportamiento
+> esperado, no una incidencia). Los budgets de la miembro (§3: `free-tier` $100/mes y `otel-lab-daily`
+> $1/día) funcionan como **guardarraíl por-cuenta**; el **techo de coste real es el pool de créditos del
+> pagador**. Queda como **paso humano pendiente** un **budget a nivel de pagador** en la consola de
+> `070443470565` (no gestionable desde la cuenta miembro). El **teardown** sigue rigiendo el coste fuera
+> de sesión.
+
 ---
 
 ## 2. Resolución del "sandbox" de la cuenta (tarea 0.0) — SCPs del propio org
