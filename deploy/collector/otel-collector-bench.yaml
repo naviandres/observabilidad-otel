@@ -1,0 +1,151 @@
+# OTel Collector — BENCHMARK mode (PLAN §4.A / §3.4 C2).
+#
+# Same receivers/processors as otel-collector-local.yaml (identical pipeline
+# cost for variants A and B), with two benchmark-specific changes:
+#
+#   * TRACES are OFF: the managed trace exporters are disabled during the
+#     measurement (§3.4 C2) and Jaeger is stopped, so the traces pipeline
+#     drains into the `nop` sink (zero cost, no network, no disk). The sink
+#     is env-gated the same way as the GCP config's OTEL_TRACES_EXPORTER.
+#   * LOGS go to a local `nop` sink by default, but the cloud log exporters
+#     are env-gated so the orchestrator can measure the REAL per-cloud log
+#     ingest during variant B without ever touching the repo files:
+#       OTEL_BENCH_AWS_LOGS_EXPORTER=awscloudwatchlogs/bench   (else nop/aws)
+#       OTEL_BENCH_GCP_LOGS_EXPORTER=googlecloud/bench          (else nop/gcp)
+#     With the gate on, logs land in CloudWatch log groups
+#     /otel/labs/bench/service-{a,b} and in the Cloud Logging log name
+#     otel-labs-bench — the two places scripts/benchmark.ps1 reads the
+#     incremental cost from.
+#
+# METRICS stay on the prometheus exporter: Prometheus local is the measuring
+# instrument (§4.A: backends off except Prometheus).
+#
+# Validate with the contrib binary (same pattern as the local config):
+#   docker run --rm -e GCP_PROJECT_ID=p -v "${PWD}/deploy/collector:/cfg" \
+#     otel/opentelemetry-collector-contrib:0.162.0 \
+#     validate --config=/cfg/otel-collector-bench.yaml
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["127.0.0.1:8888"]
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      processes:
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 2s
+    override: false
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: bench
+        action: upsert
+      - key: cloud.platform
+        value: local
+        action: upsert
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, attributes["log.severity"]) where attributes["log.severity"] != nil
+          - delete_key(attributes, "log.severity") where attributes["log.severity"] != nil
+          - set(body, Concat([body], "")) where IsString(body) == false
+      - context: resource
+        statements:
+          # Per-service CloudWatch log group for the bench ingest measurement
+          # (the awscloudwatchlogs exporter routes by this resource attribute).
+          - set(attributes["aws.log.group.names"], "/otel/labs/bench/service-a") where attributes["service.name"] == "service-a"
+          - set(attributes["aws.log.group.names"], "/otel/labs/bench/service-b") where attributes["service.name"] == "service-b"
+  attributes/redact:
+    actions:
+      - key: card.number
+        action: delete
+      - key: card.cvv
+        action: delete
+      - key: email
+        action: delete
+      - key: authorization
+        action: delete
+  batch:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 5s
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 127.0.0.1:1777
+
+exporters:
+  # No-op sinks: the local default for traces (C2) and for the gated logs.
+  nop:
+  nop/aws:
+  nop/gcp:
+  # Cloud log sinks, active only when the orchestrator sets the gate env to
+  # this exporter name. Credentials come from the container env (AWS) and the
+  # mounted ADC file (GCP); nothing is baked into this file.
+  awscloudwatchlogs/bench:
+    # Fallback group; the per-service group comes from the
+    # aws.log.group.names resource attribute set by transform/logs above.
+    region: ${env:AWS_REGION}
+    log_group_name: /otel/labs/bench
+    log_stream_name: otel-lab-bench
+  googlecloud/bench:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      default_log_name: otel-labs-bench
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otel
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, pprof]
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: ["${env:OTEL_BENCH_TRACES_EXPORTER:-nop}"]
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, transform/logs, attributes/redact, batch]
+      exporters:
+        - nop
+        - "${env:OTEL_BENCH_AWS_LOGS_EXPORTER:-nop/aws}"
+        - "${env:OTEL_BENCH_GCP_LOGS_EXPORTER:-nop/gcp}"
