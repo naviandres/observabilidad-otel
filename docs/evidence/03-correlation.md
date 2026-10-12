@@ -50,19 +50,33 @@ El pipeline de métricas SÍ funciona (A6/A7/A9/A12 PASS), pero los **exemplars 
    `deployment.environment` consistentes con la traza) y A3/A4 (X-Ray). En GCP, A11
    (logs con trace normalizado) + A12 (métricas con labels `service.name`).
 
-A8 queda FAIL en el JSON con esa razón; el exit code del script no lo trata como
-obligatoria (PLAN §3.A). Un scrape con Grafana Tempo/Mimir expondría los exemplars
-del SDK sin el puente — fuera del alcance de este lab (sin ALB/ingress permanente).
+A8 es una aserción **obligatoria** (catálogo `ASSERTION_CATALOG`,
+`scripts/verify_correlation.py` L143, `oblig=True`; el exit es
+`return 1 if report.required_failures`). Su FAIL hace que **el exit code de la corrida
+mono AWS (corrA10) fuera 1**, no "verde con nota" — el test del propio entregable
+`tests/test_verify_correlation_aws.py::test_aws_mode_no_exemplars_fails_a8` (L493-505)
+fija ese `rc == 1`. Se presenta por tanto como FAIL de aserción obligatoria con su
+cadena de evidencia: el SDK sí manda exemplars; el exporter prometheus del collector
+(ADOT v0.46.0 / contrib 0.162.0) no los expone en el scrape; la correlación
+traza↔métrica queda demostrada igualmente por A5/A6/A7. El cierre de fase es la unión
+de las corridas con A8 documentada como FAIL. Un scrape con Grafana Tempo/Mimir
+expondría los exemplars del SDK sin el puente — fuera del alcance de este lab (sin
+ALB/ingress permanente).
 
 ## Degradaciones de la corrida dual (corrDUAL3) — por qué la evidencia es la UNIÓN
 
-En corrDUAL3, `service-a` corre en ECS y llama a `service-b` de **GKE** (LB regional),
-así que el path AWS pierde a service-b: A3/A4/A5/A7 FAIL en ESA corrida (sin segmentos
-ni logs de service-b en grupos AWS) y A10/A11/A12 FAIL por timing de la traza cruzada
-(spans/indexación fuera del deadline de esa corrida). No son regresiones: las mismas
-aserciones PASS en sus corridas dedicadas (corrA10 / corrGCP6). El cierre de fase es
-la **unión** de las tres, como fija el PLAN §3.A y el README ("Sesión dual-cloud").
-A13 no degrada: exige el MISMO trace en ambas nubes y PASS con `6cbbd62a...`.
+En corrDUAL3, `service-a` corre en ECS y llama a `service-b` de **GKE** (LB regional).
+Las degradaciones A3/A4/A5/A7/A10/A11/A12 son **estructurales del modo dual**, no de
+timing: en el path AWS falta `service-b` — sus señales no aparecen en X-Ray ni en
+CloudWatch (A3/A4/A5/A7 FAIL en ESA corrida)— y en el path GCP falta `service-a` — sus
+spans no aparecen en Cloud Trace (A10; el JSON registra `spans_service_a=[]` con los de
+`service-b` presentes e indexados), sus logs no aparecen en Cloud Logging (A11) y
+`orders_created_total` se incrementa en el lado AWS, sin series en GMP (A12). No son
+regresiones: el **cierre definitivo de cada aserción es la corrida que le corresponde**
+— A1-A7/A9 en la mono AWS (corrA10), A10-A12 en la mono GCP (corrGCP6), A13 en la dual
+(corrDUAL3) —, no una unión "por timing". El cierre de fase es esa unión, como fija el
+PLAN §3.A y el README ("Sesión dual-cloud"). A13 no degrada: exige el MISMO trace en
+ambas nubes y PASS con `6cbbd62a...`.
 
 ## Cómo se reproducen
 
@@ -82,3 +96,15 @@ solo si una aserción OBLIGATORIA falla. Historial: la corrida del 2026-10-11
 (trace `e1ac08c9...`, solo GCP interno) cerró A10-A12 por primera vez; quedó
 superada por corrGCP6. Teardown de la sesión verificado 2026-10-12: ECS/VPC y
 GKE/LB vacíos (`docs/evidence/instance-hours.csv`, `cluster-hours.csv`).
+
+## Disclosure de coste — desviación del criterio "<1 USD"
+
+La sesión costó **~$2.22 USD** (Fargate ~$0.62 según `instance-hours.csv` L19 + GKE
+~$1.6 según `cluster-hours.csv` L15), **por encima del criterio de aceptación
+"coste de sesión <1 USD"**. Qué subió: la pausa de ~9.2 h con nubes encendidas, el
+re-deploy de GKE por el add-on CSI post-create (`UPDATE_CLUSTER` 05:06-05:13Z), el
+node pool e2-medium de 3 nodos (autoscaling 0-3), las 2 tareas Fargate sucesivas
+(rev 12→13) y el LB regional ~3 h. Qué recortaría la próxima: CSI habilitado en el
+create, pool único desde el día 1 y desired=0 durante los fixes largos. No es
+arreglable retroactivamente: es disclosure para que la confirmación humana
+testing→done sea informada.
