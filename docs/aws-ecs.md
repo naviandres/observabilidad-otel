@@ -52,7 +52,9 @@ make aws-access-grant              # scripts/access.ps1 -Action Grant
 make aws-verify                    # verify_correlation.py --include-aws contra la IP de la task
 #    (equivalente a mano: python scripts/verify_correlation.py
 #     --endpoint http://<IP_TASK>:8000 --include-aws
-#     --prometheus-url http://<IP_TASK>:8889/metrics)
+#     --prometheus-url http://<IP_TASK>:8000/metrics)   <- APP-LEVEL: A8 exige el
+#     scrape de la app (OpenMetrics con exemplars, §7); :8889/metrics es solo el
+#     collector (series A9; sus exemplars no se propagan — corrA8, PASS 2026-10-12)
 #    OJO (verificado en vivo 2026-10-12): con aws-cli 2.32.x/botocore 1.43 los
 #    details de los attachments de ECS salen en camelCase (`name`/`value`), y el
 #    JMESPath `.Value` de la resolucion de IP falla -> `make aws-verify` NO
@@ -210,8 +212,12 @@ Sustituto real — `scripts/access.ps1` (targets `aws-access-grant` /
    **propia respuesta** de `authorize-security-group-ingress` (nombres reales
    del alambre Query: `securityGroupRuleSet[].securityGroupRuleId`; el script
    los extrae con el patrón `sgr-<hex>`, robusto al naming).
-2. **Verificación**: `make aws-verify` corre el framework `--include-aws`
-   contra `http://<IP_TASK>:8000` con `--prometheus-url http://<IP_TASK>:8889/metrics`.
+ 2. **Verificación**: `make aws-verify` corre el framework `--include-aws`
+    contra `http://<IP_TASK>:8000` con `--prometheus-url http://<IP_TASK>:8889/metrics`.
+    Nota: ese scrape (collector) cubre A1-A7/A9 pero **no cierra A8** — para A8
+    apunta al scrape app-level: `make verify-correlation-aws
+    PROM_URL=http://<IP_TASK>:8000/metrics` (§7; así cerró corrA8, A1-A9 PASS
+    con exit 0, 2026-10-12T20:33:05Z).
 3. **Revoke**: revoca de forma **determinista y simétrica al grant** con
    `ec2 revoke-security-group-ingress --group-id <SG> --ip-permissions`
    (`IpProtocol=tcp,FromPort/ToPort=<puerto>,IpRanges=[{CidrIp=<IP>/32}]`; las

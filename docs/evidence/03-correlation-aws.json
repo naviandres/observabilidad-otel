@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-10-12T16:33:06Z",
+  "timestamp": "2026-10-12T20:33:05Z",
   "project": "otel-lab-obs-2610",
-  "endpoint": "http://100.26.200.219:8000",
-  "trace_id": "580cd2c4027a92df26067717cf90a887",
+  "endpoint": "http://34.203.36.73:8000",
+  "trace_id": "d718dedd68181d5d61ee30afcfb2c911",
   "aserciones": [
     {
       "id": 1,
@@ -10,7 +10,7 @@
       "estado": "PASS",
       "razon": "",
       "detalles": {
-        "url": "http://100.26.200.219:8000/orders",
+        "url": "http://34.203.36.73:8000/orders",
         "status": 200
       }
     },
@@ -20,7 +20,7 @@
       "estado": "PASS",
       "razon": "",
       "detalles": {
-        "x-trace-id": "580cd2c4027a92df26067717cf90a887"
+        "x-trace-id": "d718dedd68181d5d61ee30afcfb2c911"
       }
     },
     {
@@ -32,12 +32,12 @@
         "segmentos_service_a": 1,
         "segmentos_service_b": 1,
         "parent_ids_service_b": [
-          "10d56331ff563e74"
+          "01a64efcdd6b734e"
         ],
         "ids_pertenecientes_a_service_a": 5,
         "enlace_parent_id_correcto": false,
-        "xray_trace_id_buscado": "1-580cd2c4-027a92df26067717cf90a887",
-        "trazas_ventana": 17,
+        "xray_trace_id_buscado": "1-d718dedd-68181d5d61ee30afcfb2c911",
+        "trazas_ventana": 24,
         "aristas_grafo": [
           [
             "service-a",
@@ -119,7 +119,7 @@
         ],
         "periodo_segundos": 300,
         "puntos": 1,
-        "incremento": 1.0
+        "incremento": 2.0
       }
     },
     {
@@ -150,10 +150,19 @@
     {
       "id": 8,
       "nombre": "Prometheus: exemplars con trace_id de traza existente",
-      "estado": "FAIL",
-      "razon": "la metrica de latencia no expone exemplars con trace_id en el scrape (activar exemplars en el exporter prometheus del collector)",
+      "estado": "PASS",
+      "razon": "",
       "detalles": {
-        "series": 1201
+        "metricas_con_exemplares": [
+          "http_server_duration_milliseconds_bucket"
+        ],
+        "trace_ids_ejemplar": [
+          "d718dedd68181d5d61ee30afcfb2c911"
+        ],
+        "trazas_verificadas_en_xray": [
+          "d718dedd68181d5d61ee30afcfb2c911"
+        ],
+        "tempo": "sub-check externo SKIP: Grafana Cloud Tempo no configurado (placeholder honesto; la validacion real es BatchGetTraces)"
       }
     },
     {
@@ -164,7 +173,7 @@
       "detalles": {
         "namespace": "OtelLab",
         "custom_metrics": 1,
-        "prometheus_series": 1201,
+        "prometheus_series": 31,
         "limite_custom_metrics": 10,
         "limite_series": 1500
       }
