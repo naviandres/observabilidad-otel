@@ -1,0 +1,74 @@
+[
+  {
+    "AlarmName": "otel-lab-error-ratio",
+    "AlarmDescription": "R-05 guardrail: ratio 5xx/fallo de negocio > 5% (2 periodos de 5 min). EMF counters reales del collector (orders_failed_total / orders_created_total, namespace OtelLab). La accion de notificacion queda pendiente del guardraíl de coste (deuda del proximo ciclo: hace falta un topic SNS o una accion EC2-terminate, no presupuestado aqui).",
+    "Metrics": [
+      {
+        "Id": "r1",
+        "Expression": "m2 / m1",
+        "Label": "error ratio (orders_failed / orders_created)",
+        "ReturnData": true
+      },
+      {
+        "Id": "m1",
+        "MetricStat": {
+          "Metric": {
+            "Namespace": "OtelLab",
+            "MetricName": "orders_created_total",
+            "Dimensions": [
+              { "Name": "service.name", "Value": "service-a" },
+              { "Name": "cloud.provider", "Value": "aws" },
+              { "Name": "deployment.environment", "Value": "lab" }
+            ]
+          },
+          "Stat": "Sum",
+          "Period": 300
+        },
+        "ReturnData": false
+      },
+      {
+        "Id": "m2",
+        "MetricStat": {
+          "Metric": {
+            "Namespace": "OtelLab",
+            "MetricName": "orders_failed_total",
+            "Dimensions": [
+              { "Name": "service.name", "Value": "service-a" },
+              { "Name": "cloud.provider", "Value": "aws" },
+              { "Name": "deployment.environment", "Value": "lab" }
+            ]
+          },
+          "Stat": "Sum",
+          "Period": 300
+        },
+        "ReturnData": false
+      }
+    ],
+    "ComparisonOperator": "GreaterThanThreshold",
+    "Threshold": 0.05,
+    "EvaluationPeriods": 2,
+    "DatapointsToAlarm": 2,
+    "TreatMissingData": "notBreaching",
+    "ActionsEnabled": true,
+    "AlarmActions": []
+  },
+  {
+    "AlarmName": "otel-lab-db-degradation",
+    "AlarmDescription": "R-05 guardrail: aproximacion de la degradacion de latencia de la dependencia DB con las metricas EMF disponibles. DESVIACION documentada: el PLAN pedia un umbral de latencia p99, pero la lista blanca EMF del collector solo publica 4 contadores (ningun histograma llega a CloudWatch, decision de coste PLAN 3.4 C1), y la metrica de CPU del task tampoco existe (cw-agent exit 1). db_query_errors_total es el sintoma publicable mas cercano a una p99 desbordada (timeouts y errores de query). La p99 real se vigila en el panel 4 de Grafana (Prometheus). Sin acciones SNS (deuda del guardraíl).",
+    "Namespace": "OtelLab",
+    "MetricName": "db_query_errors_total",
+    "Dimensions": [
+      { "Name": "service.name", "Value": "service-a" },
+      { "Name": "cloud.provider", "Value": "aws" },
+      { "Name": "deployment.environment", "Value": "lab" }
+    ],
+    "Stat": "Sum",
+    "Period": 300,
+    "EvaluationPeriods": 1,
+    "Threshold": 5,
+    "ComparisonOperator": "GreaterThanThreshold",
+    "TreatMissingData": "notBreaching",
+    "ActionsEnabled": true,
+    "AlarmActions": []
+  }
+]
