@@ -38,6 +38,17 @@
       }
     },
     {
+      "Sid": "EcsExecSsmmessages",
+      "Effect": "Allow",
+      "Action": [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SsmReadOnly",
       "Effect": "Allow",
       "Action": "ssm:DescribeParameters",

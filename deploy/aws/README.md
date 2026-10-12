@@ -14,9 +14,11 @@ targets `aws-*` + `scripts/tunnel.ps1`.
 | `iam/execution-role-policy.json` | Policy for the **execution role** (ECR pull, CloudWatch Logs write, SSM parameter read for `secrets`). |
 | `iam/task-role-policy.json` | Policy for the **task role** (X-Ray write+sampling, CloudWatch Logs/metrics write, SSM/EC2 read for `resourcedetection/ecs`). |
 
-Both policies are attachable JSON documents; they carry the same
-`__AWS_ACCOUNT_ID__` / `__AWS_REGION__` tokens as the task definition and are
-rendered by the `aws-start` target. Secret material **never** lives here:
+Both policies are attachable JSON documents that carry the same
+`__AWS_ACCOUNT_ID__` / `__AWS_REGION__` tokens as the task definition. Unlike
+the task definition, `aws-start` does **not** render or apply them: the deploy
+user has no `iam:*`, so a human substitutes the tokens and attaches each policy
+to its role once (trust policy below). Secret material **never** lives here:
 it is stored as SSM SecureString parameters and only referenced by ARN.
 
 ## Template tokens
@@ -42,6 +44,19 @@ it is stored as SSM SecureString parameters and only referenced by ARN.
 | `/otel-lab/grafana/tempo-endpoint` · `/tempo-auth` | collector `otlphttp/tempo` |
 | `/otel-lab/grafana/loki-endpoint` · `/loki-auth` | collector `otlphttp/loki` |
 | `/otel-lab/cloudwatch-agent/config` | `cloudwatch-agent` (`CW_CONFIG_CONTENT`) |
+
+The `otel-collector` container also receives `AWS_REGION` as a plain
+`environment` value and the six Grafana parameters above as `secrets`, because
+its baked-in config (`deploy/collector/otel-collector-aws.yaml`) expands them
+with `${env:...}`; without them the collector fails to start.
+
+## Resource sizing
+
+The task profile is `cpu 1024` / `memory 2048`. Per-container reservations must
+fit inside it, so the sums are: CPU `256 + 256 + 256 + 256 = 1024` (the
+best-effort `cloudwatch-agent` sidecar is left without a CPU reservation) and
+memory `384 + 384 + 512 + 512 + 128 = 1920 < 2048`. Raise the task-level profile
+before raising any per-container reservation.
 
 ## Log path — decision (Fargate does not support `json-file`)
 

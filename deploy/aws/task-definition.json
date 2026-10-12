@@ -26,19 +26,20 @@
       "image": "__ECR_REGISTRY__/otel-lab/service-a:__IMAGE_TAG__",
       "essential": true,
       "cpu": 256,
-      "memoryReservation": 512,
+      "memoryReservation": 384,
       "portMappings": [
         { "containerPort": 8080, "hostPort": 8080, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
         { "name": "SERVICE_B_URL", "value": "http://localhost:8081/api/service-b" },
-        { "name": "DB_HOST", "value": "localhost" },
-        { "name": "DB_PORT", "value": "5432" },
-        { "name": "DB_NAME", "value": "otel" },
-        { "name": "DB_USER", "value": "otel-lab" },
-        { "name": "DB_PASSWORD", "value": "otel-lab" },
         { "name": "OTEL_SERVICE_NAME", "value": "service-a" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/database-url/service-a"
+        }
       ],
       "healthCheck": {
         "command": [
@@ -65,18 +66,19 @@
       "image": "__ECR_REGISTRY__/otel-lab/service-b:__IMAGE_TAG__",
       "essential": true,
       "cpu": 256,
-      "memoryReservation": 512,
+      "memoryReservation": 384,
       "portMappings": [
         { "containerPort": 8081, "hostPort": 8081, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
-        { "name": "DB_HOST", "value": "localhost" },
-        { "name": "DB_PORT", "value": "5432" },
-        { "name": "DB_NAME", "value": "otel" },
-        { "name": "DB_USER", "value": "otel-lab" },
-        { "name": "DB_PASSWORD", "value": "otel-lab" },
         { "name": "OTEL_SERVICE_NAME", "value": "service-b" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/database-url/service-b"
+        }
       ],
       "healthCheck": {
         "command": [
@@ -106,8 +108,13 @@
       "memoryReservation": 512,
       "environment": [
         { "name": "POSTGRES_USER", "value": "otel-lab" },
-        { "name": "POSTGRES_PASSWORD", "value": "otel-lab" },
         { "name": "POSTGRES_DB", "value": "otel" }
+      ],
+      "secrets": [
+        {
+          "name": "POSTGRES_PASSWORD",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/postgres/password"
+        }
       ],
       "mountPoints": [
         {
@@ -137,9 +144,38 @@
       "name": "otel-collector",
       "image": "__ECR_REGISTRY__/otel-lab/otel-collector:__IMAGE_TAG__",
       "essential": true,
-      "cpu": 512,
-      "memoryReservation": 768,
+      "cpu": 256,
+      "memoryReservation": 512,
       "command": ["--config=file:/cfg/otel-collector-aws.yaml"],
+      "environment": [
+        { "name": "AWS_REGION", "value": "__AWS_REGION__" }
+      ],
+      "secrets": [
+        {
+          "name": "GRAFANA_PROM_URL",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/prom-url"
+        },
+        {
+          "name": "GRAFANA_PROM_AUTH",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/prom-auth"
+        },
+        {
+          "name": "GRAFANA_TEMPO_ENDPOINT",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/tempo-endpoint"
+        },
+        {
+          "name": "GRAFANA_TEMPO_AUTH",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/tempo-auth"
+        },
+        {
+          "name": "GRAFANA_LOKI_ENDPOINT",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/loki-endpoint"
+        },
+        {
+          "name": "GRAFANA_LOKI_AUTH",
+          "valueFrom": "arn:aws:ssm:__AWS_REGION__:__AWS_ACCOUNT_ID__:parameter/otel-lab/grafana/loki-auth"
+        }
+      ],
       "portMappings": [
         { "containerPort": 4317, "hostPort": 4317, "protocol": "tcp" }
       ],
@@ -157,8 +193,7 @@
       "name": "cloudwatch-agent",
       "image": "public.ecr.aws/cloudwatch-agent/cloudwatch-agent:1.300073.0b1828",
       "essential": false,
-      "cpu": 256,
-      "memoryReservation": 256,
+      "memoryReservation": 128,
       "secrets": [
         {
           "name": "CW_CONFIG_CONTENT",

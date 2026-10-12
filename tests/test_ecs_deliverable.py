@@ -19,6 +19,7 @@ MAKEFILE = ROOT / "Makefile"
 GITIGNORE = ROOT / ".gitignore"
 TUNNEL = ROOT / "scripts" / "tunnel.ps1"
 DOCS = ROOT / "docs" / "aws-ecs.md"
+IAM_TASK_ROLE = ROOT / "deploy" / "aws" / "iam" / "task-role-policy.json"
 
 CONTAINERS = {"service-a", "service-b", "postgres", "otel-collector", "cloudwatch-agent"}
 EXPECTED_PORTS = {
@@ -150,6 +151,74 @@ def test_tunnel_and_docs_present():
     assert "awslogs" in DOCS.read_text(encoding="utf-8")
     rendered_ignored = "task-definition.rendered.json" in GITIGNORE.read_text(encoding="utf-8")
     assert rendered_ignored
+
+
+def _policy_actions(policy):
+    actions = set()
+    for statement in policy["Statement"]:
+        action = statement.get("Action", [])
+        if isinstance(action, str):
+            action = [action]
+        actions.update(action)
+    return actions
+
+
+def test_task_role_grants_ecs_exec_ssmmessages():
+    """`enableExecuteCommand` exige ssmmessages en la task role (ECS Exec)."""
+    policy = json.loads(IAM_TASK_ROLE.read_text(encoding="utf-8"))
+    actions = _policy_actions(policy)
+    required = {
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel",
+    }
+    missing = required - actions
+    assert not missing, f"task role sin permisos ECS Exec: {sorted(missing)}"
+
+
+def test_collector_container_provides_env_its_config_expands():
+    """El contenedor collector debe aportar todo `${env:...}` del YAML ADOT."""
+    collector = _containers(_task_def())["otel-collector"]
+    provided = {e["name"] for e in collector.get("environment", [])}
+    provided |= {s["name"] for s in collector.get("secrets", [])}
+    yaml_text = COLLECTOR_AWS_YAML.read_text(encoding="utf-8")
+    required = set(re.findall(r"\$\{env:([A-Z0-9_]+)\}", yaml_text))
+    assert required, "el YAML ADOT no declara ningun ${env:...}"
+    missing = required - provided
+    assert not missing, (
+        f"collector sin variables que su config expande: {sorted(missing)}"
+    )
+    assert {
+        "AWS_REGION",
+        "GRAFANA_PROM_URL", "GRAFANA_PROM_AUTH",
+        "GRAFANA_TEMPO_ENDPOINT", "GRAFANA_TEMPO_AUTH",
+        "GRAFANA_LOKI_ENDPOINT", "GRAFANA_LOKI_AUTH",
+    } <= provided
+
+
+def test_container_reservations_fit_task_profile():
+    """La suma de cpu/memoryReservation de los contenedores cabe en la task."""
+    td = _task_def()
+    task_cpu = int(td["cpu"])
+    task_memory = int(td["memory"])
+    containers = list(_containers(td).values())
+    cpu_sum = sum(int(c.get("cpu", 0)) for c in containers)
+    memory_sum = sum(int(c.get("memoryReservation", 0)) for c in containers)
+    assert cpu_sum <= task_cpu, f"cpu total {cpu_sum} > task {task_cpu}"
+    assert memory_sum < task_memory, f"mem total {memory_sum} >= task {task_memory}"
+
+
+def test_docs_have_no_internal_jargon():
+    """El doc entregable no debe filtrar identificadores del arnes externo."""
+    text = DOCS.read_text(encoding="utf-8")
+    forbidden = ["pa" + "ta", "har" + "ness", "leader" + " spec"]
+    for word in forbidden:
+        assert not re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE), (
+            f"termino interno {word!r} filtrado en {DOCS.name}"
+        )
+    assert not re.search(r"feature\s*#", text, re.IGNORECASE)
+    assert not re.search(r"#[0-9]+b?", text)
 
 
 def test_no_secrets_in_versioned_aws_artifacts():

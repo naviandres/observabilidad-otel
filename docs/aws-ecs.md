@@ -1,6 +1,6 @@
 # Despliegue AWS — ECS Fargate (Fase 2)
 
-> Pata AWS del pipeline dual-cloud. El mismo `service-a` → `service-b` →
+> Lado AWS del pipeline dual-cloud. El mismo `service-a` → `service-b` →
 > PostgreSQL con el **Collector ADOT** exportando a X-Ray / CloudWatch Logs /
 > CloudWatch EMF y un **CloudWatch Agent** de métricas ECS. La vertiente gemela en
 > GCP está en `deploy/collector/otel-collector-gcp.yaml` + `helm/` + `infra/gcp`.
@@ -65,6 +65,21 @@ make aws-net-destroy               # borra la red tagueada (opcional, $0)
 | postgres | `public.ecr.aws/docker/library/postgres:16-alpine` | 5432 | DB transaccional (volumen nombrado `postgres-data`) |
 | otel-collector | ECR `otel-lab/otel-collector:<tag>` (ADOT 0.46.0 + YAML AWS) | 4317 | OTLP/gRPC; exporta X-Ray + EMF + logs |
 | cloudwatch-agent | `public.ecr.aws/cloudwatch-agent/cloudwatch-agent:1.300073.0b1828` | — | métricas ECS; config vía SSM, `essential:false` |
+
+**Reservas de recursos.** El perfil de la task es `cpu 1024` / `memory 2048`
+(§1). La suma de las reservas por contenedor cabe dentro de ese perfil:
+CPU `256 + 256 + 256 + 256 = 1024` (el `cloudwatch-agent`, best-effort, se deja
+sin reserva de CPU) y memoria `384 + 384 + 512 + 512 + 128 = 1920 < 2048`. Si se
+sube un perfil por contenedor hay que subir antes el perfil de la task.
+
+**Variables y secretos del collector.** El contenedor `otel-collector` recibe
+`AWS_REGION` como `environment` y los seis valores de Grafana Cloud
+(`GRAFANA_PROM_URL`/`AUTH`, `GRAFANA_TEMPO_ENDPOINT`/`AUTH`,
+`GRAFANA_LOKI_ENDPOINT`/`AUTH`) como `secrets` de SSM, porque su config
+horneada (`deploy/collector/otel-collector-aws.yaml`) los expande con
+`${env:...}`. La contraseña de Postgres y las URLs de base de datos de los
+servicios también se inyectan como `secrets` de SSM; en el JSON versionado solo
+quedan las referencias por ARN, nunca el valor.
 
 El template usa tokens que `make aws-start` renderiza con `sed`:
 
