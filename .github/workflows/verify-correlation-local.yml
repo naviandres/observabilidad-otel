@@ -1,0 +1,61 @@
+# CI: la verificacion de correlacion (PLAN 3.A) en MODO LOCAL sobre el stack
+# compose core. El framework degrada honestamente: las aserciones de nube
+# quedan en SKIP sin banderas y eso NO rompe el job; solo un FAIL de una
+# asercion obligatoria (A1/A2 locales, o cualquier nube pedida) da exit != 0.
+# Las corridas con --include-aws / --include-gcp pertenecen a la sesion de
+# nube (credenciales humanas via SSM/ADC), no a este job sin secretos.
+
+name: verify-correlation-local
+
+on:
+  pull_request:
+    paths:
+      - "scripts/verify_correlation.py"
+      - "service-a/**"
+      - "service-b/**"
+      - "deploy/**"
+      - "dashboards/**"
+      - "requirements-dev.txt"
+      - ".github/workflows/verify-correlation-local.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-corr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: dependencias de verificacion (pytest + boto3 pinneados)
+        run: pip install -r requirements-dev.txt
+
+      - name: stack core (postgres + collector + service-a + service-b)
+        run: docker compose -f deploy/docker-compose.yml up -d --build
+
+      - name: esperar el health de service-a (:8000/metrics)
+        run: timeout 180 bash -c 'until curl -sf http://localhost:8000/metrics >/dev/null; do sleep 3; done'
+
+      - name: verify_correlation.py en modo local (SKIP permitido, FAIL no)
+        run: python scripts/verify_correlation.py --endpoint http://localhost:8000 --out-dir /tmp/evidence
+
+      - name: subir la evidencia del run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: correlation-evidence-local
+          path: /tmp/evidence
+          if-no-files-found: ignore
+
+      - name: teardown del stack
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
