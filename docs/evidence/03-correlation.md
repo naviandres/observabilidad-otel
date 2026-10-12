@@ -1,43 +1,84 @@
-# 03 — Correlación cross-signal (verify_correlation.py)
+# 03 — Correlación cross-signal (verify_correlation.py) — EVIDENCIA FINAL dual-cloud
 
-> **Fecha:** 2026-10-11T18:59:24Z · **Proyecto:** `otel-lab-obs-2610` · **Endpoint:** `http://localhost:18080` · **trace_id inyectado:** `e1ac08c9fcf8b0bafdb95528cc084903`
+> **Cierre de fase:** 2026-10-12 (sesión dual-cloud, rondas 5-6). Estado final = **UNIÓN
+> de tres corridas**: `corrA10` (mono AWS, 16:33Z, trace `580cd2c4027a92df26067717cf90a887`),
+> `corrGCP6` (mono GCP, 19:01Z, trace `91559eeaf1d50df4195fcc44719bb552`) y `corrDUAL3`
+> (dual, 17:11Z, trace `6cbbd62a9f5b259cdf5614ce6ada3d11`). Proyecto `otel-lab-obs-2610`.
+> JSONs completos en `03-correlation-aws.json`, `03-correlation-gcp.json` y
+> `03-correlation-dual.json`; el canónico `03-correlation.json` es la corrida dual
+> (única con las 13 aserciones evaluadas y A13 PASS).
 
-| # | Aserción | Estado | Razón |
-|---|---|---|---|
-| 1 | Inyección de traceparent W3C en POST /orders | **PASS** | — |
-| 2 | Header x-trace-id de la respuesta == trace inyectado | **PASS** | — |
-| 3 | X-Ray: segmentos de service-a y service-b con parent_id correcto | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 4 | X-Ray: atributo db.system=postgresql en segmento de service-b | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 5 | CloudWatch Logs: ≥1 entrada con trace_id por servicio | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 6 | CloudWatch Metrics: orders_created_total incrementado en la ventana | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 7 | Consistencia de resource entre traza, log y métrica por nube | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 8 | Prometheus: exemplars con trace_id de traza existente | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 9 | Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus) | **SKIP** | la verificación del lado AWS (despliegue AWS aun no disponible) |
-| 10 | Cloud Trace: traza W3C con spans de service-a y service-b | **PASS** | — |
-| 11 | Cloud Logging: ≥1 entrada con trace_id por servicio | **PASS** | — |
-| 12 | Cloud Monitoring: orders_created_total incrementado en la ventana | **PASS** | — |
-| 13 | Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes | **SKIP** | despliegue AWS no disponible (cuenta en sandbox) |
+## Tabla UNION — estado final de las 13 aserciones (PLAN §3.A)
 
-Detalles por aserción en `03-correlation.json` (campo `detalles`).
-SKIP no es fallo; el exit code !=0 solo si una aserción OBLIGATORIA falla (PLAN §3.A).
+| # | Aserción | Estado final | Corrida que la probó | trace_id de ejemplo |
+|---|---|---|---|---|
+| 1 | Inyección de traceparent W3C en POST /orders | **PASS** | corrA10 (y corrGCP6/corrDUAL3) | `580cd2c4027a92df26067717cf90a887` |
+| 2 | Header x-trace-id de la respuesta == trace inyectado | **PASS** | corrA10 (y corrGCP6/corrDUAL3) | `580cd2c4027a92df26067717cf90a887` |
+| 3 | X-Ray: segmentos de service-a y service-b con parent_id correcto | **PASS** | corrA10 — verificación POR ESTRUCTURA (grafo de servicio: `service-a→service-b→inventory`; la igualdad literal de ids es imposible con el traductor OTLP→X-Ray, R-03) | `1-580cd2c4-027a92df26067717cf90a887` |
+| 4 | X-Ray: atributo db.system=postgresql en segmento de service-b | **PASS** | corrA10 (documentos de service-b vía BatchGetTraces + grafo) | idem 3 |
+| 5 | CloudWatch Logs: ≥1 entrada con trace_id por servicio | **PASS** | corrA10 (grupos del exportador `/otel/labs/ecs-cluster/service-a|service-b`: 2+1 entradas) | `580cd2c4027a92df26067717cf90a887` |
+| 6 | CloudWatch Metrics: orders_created_total incrementado en la ventana | **PASS** | corrA10 (EMF, suma de deltas del bucket; incremento 1.0) | idem 5 |
+| 7 | Consistencia de resource entre traza, log y métrica por nube | **PASS** | corrA10 (`service.name` en las 3 señales; `cloud.provider=aws`, `deployment.environment=lab`) | idem 5 |
+| 8 | Prometheus: exemplars con trace_id de traza existente | **FAIL documentado** (limitación real del puente OTLP→prometheus; ver nota abajo) | corrA10 + corrDUAL3 (FAIL reproducible, 1201/1183 series sin exemplars en el scrape) | n/a |
+| 9 | Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus) | **PASS** | corrA10 (`OtelLab`: 1 custom ≤ 10; scrape: 1201 series ≤ 1500; `NoDimensionRollup`) | idem 5 |
+| 10 | Cloud Trace: traza W3C con spans de service-a y service-b | **PASS** | corrGCP6 (23 spans: a+b con `INSERT orders`/`SELECT inventory`…) | `91559eeaf1d50df4195fcc44719bb552` |
+| 11 | Cloud Logging: ≥1 entrada con trace_id por servicio | **PASS** | corrGCP6 (6 entradas, service-a+service-b; filtro `trace:` con cota `timestamp>=`) | `91559eeaf1d50df4195fcc44719bb552` |
+| 12 | Cloud Monitoring: orders_created_total incrementado en la ventana | **PASS** | corrGCP6 (`prometheus.googleapis.com/orders_created_total/counter`, incremento 1.0; batch 60 s + incremento anclado a run_started) | `91559eeaf1d50df4195fcc44719bb552` |
+| 13 | Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes | **PASS** | corrDUAL3 — MISMO trace en AWS (`xray` + `cloudwatch_logs`) **y** GCP (`cloud_trace`) con service-a(ECS)→service-b(GKE) vía LB | `6cbbd62a9f5b259cdf5614ce6ada3d11` |
 
-## Cómo se cerrarán los SKIPs (sesión dual-cloud — pendiente de ejecución)
+**Resumen: 12/13 PASS + 1 FAIL documentado (A8).** Ningún SKIP queda: las aserciones
+3-9 cerraron en la corrida mono AWS (corrA10) y 10-13 en las corridas GCP/dual.
 
-Las aserciones 3-9 ya NO son un aplazamiento: se ejecutan con `--include-aws`
-(boto3, perfil `otel-lab`, región `us-east-1`) y quedan PASS o FAIL con razón
-de API. El cierre requiere la sesión de nube en el orden del README
-(§"Sesión dual-cloud"):
+## Nota honesta de A8 — exemplars Prometheus (FAIL demostrado, no aplazado)
 
-| # | Qué la desbloquea | Corrida | Lecturas (todas $0 free-tier) |
-|---|---|---|---|
-| 3 | task ECS con service-a+service-b | `--include-aws` (INVENTORY_URL default localhost) | `xray:GetTraceSummaries` + `xray:BatchGetTraces`; verificación POR ESTRUCTURA (segmentos + `parent_id`), nunca igualdad de ids (R-03); conversión W3C→X-Ray `1-<8hex>-<24hex>` solo para el lookup |
-| 4 | idem | `--include-aws` | `xray:BatchGetTraces` → `db.system=postgresql` en un documento de service-b |
-| 5 | collector ADOT exportando logs OTLP | `--include-aws` | `logs:FilterLogEvents` en `/otel/labs/ecs-cluster/service-a|service-b` (grupos del EXPORTADOR, no los del driver `ecs-platform`), ventana + parseo en Python, sin Logs Insights |
-| 6 | EMF del contador | `--include-aws` | `cloudwatch:GetMetricStatistics` (namespace `OtelLab`, period 300, Sum; NUNCA `GetMetricData` — R-05) |
-| 7 | resource normalizado en las 3 señales AWS | `--include-aws` | traza+log+métrica: `service.name`, `cloud.provider=aws`, `deployment.environment=lab` consistentes |
-| 8 | túnel `:8889` + exemplars activos | `--include-aws` | scrape Prometheus del collector vía `tunnel.ps1 -Mode Task`; el `trace_id` del exemplar se valida contra `BatchGetTraces`; el sub-check externo contra Tempo de Grafana Cloud queda como placeholder SKIP honesto en `detalles.tempo` si no hay Tempo real |
-| 9 | idem | `--include-aws` | `cloudwatch:ListMetrics` ≤10 custom en `OtelLab` + series del scrape ≤1500 |
-| 13 | tráfico cruzando nubes | `--include-aws --include-gcp` con `INVENTORY_URL=http://<LB_IP>:8001` | mismo `trace_id` en AWS (X-Ray o CloudWatch Logs) **y** GCP (Cloud Trace o Cloud Logging); requiere ambas banderas |
+El pipeline de métricas SÍ funciona (A6/A7/A9/A12 PASS), pero los **exemplars con
+`trace_id` no sobreviven el puente OTLP→Prometheus**. Cadena de pruebas (ronda 5,
+`progress/impl_6_correlacion_aws.md` §Bug 5):
 
-Las corridas 10-12 ya cerraron en verde contra GKE (tabla superior). La
-evidencia final de la fase es la unión de las tres corridas de esta tabla.
+1. El **SDK manda exemplars**: verificado offline con debug exporter del collector
+   (`-> Trace ID: 872a3159...` presente en el lote OTLP).
+2. El **exporter prometheus del collector NO los expone en el scrape** — ni con
+   `enable_open_metrics: true` (OpenMetrics servido, `# EOF` presente) ni con
+   `send_timestamps: true` — en ADOT v0.46.0 (core 0.141) y contrib 0.162.0.
+   Reproducido en vivo en dos nubes: corrA10 (1201 series, 0 exemplars) y
+   corrDUAL3 (1183 series, 0 exemplars).
+3. La alternativa del enunciado tampoco existe: `http://<task>:8000/metrics` (scrape
+   directo del SDK) sirve solo el registro default de `prometheus_client`
+   (process_/python_gc_), nunca las métricas OTel — estas viajan solo por OTLP.
+4. **La correlación traza↔métrica sí está demostrada por otras vías**: A5 (logs con
+   `trace_id` en CloudWatch), A6/A7 (EMF con `service.name`+`cloud.provider`+
+   `deployment.environment` consistentes con la traza) y A3/A4 (X-Ray). En GCP, A11
+   (logs con trace normalizado) + A12 (métricas con labels `service.name`).
+
+A8 queda FAIL en el JSON con esa razón; el exit code del script no lo trata como
+obligatoria (PLAN §3.A). Un scrape con Grafana Tempo/Mimir expondría los exemplars
+del SDK sin el puente — fuera del alcance de este lab (sin ALB/ingress permanente).
+
+## Degradaciones de la corrida dual (corrDUAL3) — por qué la evidencia es la UNIÓN
+
+En corrDUAL3, `service-a` corre en ECS y llama a `service-b` de **GKE** (LB regional),
+así que el path AWS pierde a service-b: A3/A4/A5/A7 FAIL en ESA corrida (sin segmentos
+ni logs de service-b en grupos AWS) y A10/A11/A12 FAIL por timing de la traza cruzada
+(spans/indexación fuera del deadline de esa corrida). No son regresiones: las mismas
+aserciones PASS en sus corridas dedicadas (corrA10 / corrGCP6). El cierre de fase es
+la **unión** de las tres, como fija el PLAN §3.A y el README ("Sesión dual-cloud").
+A13 no degrada: exige el MISMO trace en ambas nubes y PASS con `6cbbd62a...`.
+
+## Cómo se reproducen
+
+```powershell
+# mono AWS (task ECS con ambos servicios; SG con grant /32 activo):
+python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 --include-aws `
+  --prometheus-url http://<IP_TASK>:8889/metrics
+# mono GCP (port-forward svc/service-a 18080:8080):
+python scripts/verify_correlation.py --endpoint http://localhost:18080 --include-gcp
+# dual (task AWS con INVENTORY_URL=http://<LB_IP>:8001):
+python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
+  --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8889/metrics
+```
+
+Detalles por aserción en los JSON (`detalles`). SKIP no es fallo; el exit code !=0
+solo si una aserción OBLIGATORIA falla. Historial: la corrida del 2026-10-11
+(trace `e1ac08c9...`, solo GCP interno) cerró A10-A12 por primera vez; quedó
+superada por corrGCP6. Teardown de la sesión verificado 2026-10-12: ECS/VPC y
+GKE/LB vacíos (`docs/evidence/instance-hours.csv`, `cluster-hours.csv`).

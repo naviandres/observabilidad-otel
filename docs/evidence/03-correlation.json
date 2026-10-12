@@ -1,8 +1,8 @@
 {
-  "timestamp": "2026-10-11T18:59:24Z",
+  "timestamp": "2026-10-12T17:11:25Z",
   "project": "otel-lab-obs-2610",
-  "endpoint": "http://localhost:18080",
-  "trace_id": "e1ac08c9fcf8b0bafdb95528cc084903",
+  "endpoint": "http://52.55.225.153:8000",
+  "trace_id": "6cbbd62a9f5b259cdf5614ce6ada3d11",
   "aserciones": [
     {
       "id": 1,
@@ -10,7 +10,7 @@
       "estado": "PASS",
       "razon": "",
       "detalles": {
-        "url": "http://localhost:18080/orders",
+        "url": "http://52.55.225.153:8000/orders",
         "status": 200
       }
     },
@@ -20,79 +20,131 @@
       "estado": "PASS",
       "razon": "",
       "detalles": {
-        "x-trace-id": "e1ac08c9fcf8b0bafdb95528cc084903"
+        "x-trace-id": "6cbbd62a9f5b259cdf5614ce6ada3d11"
       }
     },
     {
       "id": 3,
       "nombre": "X-Ray: segmentos de service-a y service-b con parent_id correcto",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "FAIL",
+      "razon": "la traza en X-Ray no cumple el enlace parent_id service-a -> service-b",
+      "detalles": {
+        "segmentos_service_a": 1,
+        "segmentos_service_b": 0,
+        "parent_ids_service_b": [],
+        "ids_pertenecientes_a_service_a": 5,
+        "enlace_parent_id_correcto": false,
+        "xray_trace_id_buscado": "1-6cbbd62a-9f5b259cdf5614ce6ada3d11",
+        "trazas_ventana": 17,
+        "aristas_grafo": [
+          [
+            "service-a",
+            "POST"
+          ],
+          [
+            "service-a",
+            "orders"
+          ]
+        ]
+      }
     },
     {
       "id": 4,
       "nombre": "X-Ray: atributo db.system=postgresql en segmento de service-b",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "FAIL",
+      "razon": "sin segmentos de service-b que inspeccionar (ver A3)",
+      "detalles": {
+        "documentos_service_b": 0
+      }
     },
     {
       "id": 5,
       "nombre": "CloudWatch Logs: ≥1 entrada con trace_id por servicio",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "FAIL",
+      "razon": "no hay >=1 entrada con el trace_id en cada servicio (deadline agotado)",
+      "detalles": {
+        "servicios": [
+          "service-a"
+        ],
+        "grupos": [
+          "/otel/labs/ecs-cluster/service-a",
+          "/otel/labs/ecs-cluster/service-b"
+        ]
+      }
     },
     {
       "id": 6,
       "nombre": "CloudWatch Metrics: orders_created_total incrementado en la ventana",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "dimensions": [
+          {
+            "Name": "cloud.provider",
+            "Value": "aws"
+          },
+          {
+            "Name": "service.name",
+            "Value": "service-a"
+          },
+          {
+            "Name": "deployment.environment",
+            "Value": "lab"
+          }
+        ],
+        "periodo_segundos": 300,
+        "puntos": 1,
+        "incremento": 1.0
+      }
     },
     {
       "id": 7,
       "nombre": "Consistencia de resource entre traza, log y métrica por nube",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "FAIL",
+      "razon": "consistencia de resource fallada: service.name en traza: ['service-a'] (esperado ambos); service.name en log: ['service-a'] (esperado ambos)",
+      "detalles": {
+        "servicios_vistos": {
+          "traza": [
+            "service-a"
+          ],
+          "log": [
+            "service-a"
+          ],
+          "metrica": [
+            "service-a"
+          ]
+        }
+      }
     },
     {
       "id": 8,
       "nombre": "Prometheus: exemplars con trace_id de traza existente",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "FAIL",
+      "razon": "la metrica de latencia no expone exemplars con trace_id en el scrape (activar exemplars en el exporter prometheus del collector)",
+      "detalles": {
+        "series": 1183
+      }
     },
     {
       "id": 9,
       "nombre": "Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus)",
-      "estado": "SKIP",
-      "razon": "la verificación del lado AWS (despliegue AWS aun no disponible)",
-      "detalles": {}
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "namespace": "OtelLab",
+        "custom_metrics": 1,
+        "prometheus_series": 1183,
+        "limite_custom_metrics": 10,
+        "limite_series": 1500
+      }
     },
     {
       "id": 10,
       "nombre": "Cloud Trace: traza W3C con spans de service-a y service-b",
-      "estado": "PASS",
-      "razon": "",
+      "estado": "FAIL",
+      "razon": "la traza existe pero faltan spans de algun servicio",
       "detalles": {
-        "spans_service_a": [
-          "INSERT orders",
-          "INSERT orders",
-          "POST",
-          "POST /orders",
-          "POST /orders http receive",
-          "POST /orders http send",
-          "POST /orders http send",
-          "connect",
-          "inventory.reserve",
-          "order.persist",
-          "order.process",
-          "order.validate",
-          "payment.authorize"
-        ],
+        "spans_service_a": [],
         "spans_service_b": [
           "POST /inventory/reserve",
           "POST /inventory/reserve http receive",
@@ -104,43 +156,46 @@
           "inventory.query",
           "inventory.reserve",
           "payment.gateway_call"
-        ],
-        "total_spans": 23,
-        "trace_id": "e1ac08c9fcf8b0bafdb95528cc084903"
+        ]
       }
     },
     {
       "id": 11,
       "nombre": "Cloud Logging: ≥1 entrada con trace_id por servicio",
-      "estado": "PASS",
-      "razon": "",
+      "estado": "FAIL",
+      "razon": "no hay >=1 entrada por servicio para el trace inyectado (deadline agotado)",
       "detalles": {
-        "entradas": 3,
-        "servicios": [
-          "service-a",
-          "service-b"
-        ],
-        "filtro": "jsonPayload.trace_id=\"e1ac08c9fcf8b0bafdb95528cc084903\""
+        "entradas": 0,
+        "servicios": [],
+        "filtro": "textPayload:\"6cbbd62a9f5b259cdf5614ce6ada3d11\""
       }
     },
     {
       "id": 12,
       "nombre": "Cloud Monitoring: orders_created_total incrementado en la ventana",
-      "estado": "PASS",
-      "razon": "",
+      "estado": "FAIL",
+      "razon": "el contador orders_created_total no incremento en la ventana (deadline agotado)",
       "detalles": {
         "metric_type": "prometheus.googleapis.com/orders_created_total/counter",
-        "ventana_segundos": 120,
-        "series": 1,
-        "incremento_total": 1.0
+        "ventana_segundos": 240,
+        "series": 0,
+        "incremento_total": 0.0
       }
     },
     {
       "id": 13,
       "nombre": "Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes",
-      "estado": "SKIP",
-      "razon": "despliegue AWS no disponible (cuenta en sandbox)",
-      "detalles": {}
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "pivot": "trace_id W3C (X-Ray verificado por estructura, Cloud Trace conserva el id)",
+        "aws": [
+          "xray",
+          "cloudwatch_logs"
+        ],
+        "gcp": "cloud_trace",
+        "trace_id": "6cbbd62a9f5b259cdf5614ce6ada3d11"
+      }
     }
   ]
 }

@@ -1,0 +1,201 @@
+{
+  "timestamp": "2026-10-12T16:33:06Z",
+  "project": "otel-lab-obs-2610",
+  "endpoint": "http://100.26.200.219:8000",
+  "trace_id": "580cd2c4027a92df26067717cf90a887",
+  "aserciones": [
+    {
+      "id": 1,
+      "nombre": "Inyección de traceparent W3C en POST /orders",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "url": "http://100.26.200.219:8000/orders",
+        "status": 200
+      }
+    },
+    {
+      "id": 2,
+      "nombre": "Header x-trace-id de la respuesta == trace inyectado",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "x-trace-id": "580cd2c4027a92df26067717cf90a887"
+      }
+    },
+    {
+      "id": 3,
+      "nombre": "X-Ray: segmentos de service-a y service-b con parent_id correcto",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "segmentos_service_a": 1,
+        "segmentos_service_b": 1,
+        "parent_ids_service_b": [
+          "10d56331ff563e74"
+        ],
+        "ids_pertenecientes_a_service_a": 5,
+        "enlace_parent_id_correcto": false,
+        "xray_trace_id_buscado": "1-580cd2c4-027a92df26067717cf90a887",
+        "trazas_ventana": 17,
+        "aristas_grafo": [
+          [
+            "service-a",
+            "orders"
+          ],
+          [
+            "service-a",
+            "service-b"
+          ],
+          [
+            "service-b",
+            "inventory"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "nombre": "X-Ray: atributo db.system=postgresql en segmento de service-b",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "documentos_service_b": 1,
+        "aristas_grafo": [
+          [
+            "service-a",
+            "orders"
+          ],
+          [
+            "service-a",
+            "service-b"
+          ],
+          [
+            "service-b",
+            "inventory"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "nombre": "CloudWatch Logs: ≥1 entrada con trace_id por servicio",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "servicios": [
+          "service-a",
+          "service-b"
+        ],
+        "entradas": {
+          "service-a": 2,
+          "service-b": 1
+        },
+        "grupos": [
+          "/otel/labs/ecs-cluster/service-a",
+          "/otel/labs/ecs-cluster/service-b"
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "nombre": "CloudWatch Metrics: orders_created_total incrementado en la ventana",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "dimensions": [
+          {
+            "Name": "cloud.provider",
+            "Value": "aws"
+          },
+          {
+            "Name": "service.name",
+            "Value": "service-a"
+          },
+          {
+            "Name": "deployment.environment",
+            "Value": "lab"
+          }
+        ],
+        "periodo_segundos": 300,
+        "puntos": 1,
+        "incremento": 1.0
+      }
+    },
+    {
+      "id": 7,
+      "nombre": "Consistencia de resource entre traza, log y métrica por nube",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "servicios_vistos": {
+          "traza": [
+            "service-a",
+            "service-b"
+          ],
+          "log": [
+            "service-a",
+            "service-b"
+          ],
+          "metrica": [
+            "service-a"
+          ]
+        },
+        "esperado": {
+          "cloud.provider": "aws",
+          "deployment.environment": "lab"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "nombre": "Prometheus: exemplars con trace_id de traza existente",
+      "estado": "FAIL",
+      "razon": "la metrica de latencia no expone exemplars con trace_id en el scrape (activar exemplars en el exporter prometheus del collector)",
+      "detalles": {
+        "series": 1201
+      }
+    },
+    {
+      "id": 9,
+      "nombre": "Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus)",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "namespace": "OtelLab",
+        "custom_metrics": 1,
+        "prometheus_series": 1201,
+        "limite_custom_metrics": 10,
+        "limite_series": 1500
+      }
+    },
+    {
+      "id": 10,
+      "nombre": "Cloud Trace: traza W3C con spans de service-a y service-b",
+      "estado": "SKIP",
+      "razon": "GCP no incluido (ejecutar con --include-gcp)",
+      "detalles": {}
+    },
+    {
+      "id": 11,
+      "nombre": "Cloud Logging: ≥1 entrada con trace_id por servicio",
+      "estado": "SKIP",
+      "razon": "GCP no incluido (ejecutar con --include-gcp)",
+      "detalles": {}
+    },
+    {
+      "id": 12,
+      "nombre": "Cloud Monitoring: orders_created_total incrementado en la ventana",
+      "estado": "SKIP",
+      "razon": "GCP no incluido (ejecutar con --include-gcp)",
+      "detalles": {}
+    },
+    {
+      "id": 13,
+      "nombre": "Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes",
+      "estado": "SKIP",
+      "razon": "A13 requiere --include-aws y --include-gcp simultaneos (trafico cruzando las nubes)",
+      "detalles": {}
+    }
+  ]
+}

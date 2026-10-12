@@ -1,0 +1,146 @@
+{
+  "timestamp": "2026-10-12T19:01:28Z",
+  "project": "otel-lab-obs-2610",
+  "endpoint": "http://localhost:18080",
+  "trace_id": "91559eeaf1d50df4195fcc44719bb552",
+  "aserciones": [
+    {
+      "id": 1,
+      "nombre": "Inyección de traceparent W3C en POST /orders",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "url": "http://localhost:18080/orders",
+        "status": 200
+      }
+    },
+    {
+      "id": 2,
+      "nombre": "Header x-trace-id de la respuesta == trace inyectado",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "x-trace-id": "91559eeaf1d50df4195fcc44719bb552"
+      }
+    },
+    {
+      "id": 3,
+      "nombre": "X-Ray: segmentos de service-a y service-b con parent_id correcto",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 4,
+      "nombre": "X-Ray: atributo db.system=postgresql en segmento de service-b",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 5,
+      "nombre": "CloudWatch Logs: ≥1 entrada con trace_id por servicio",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 6,
+      "nombre": "CloudWatch Metrics: orders_created_total incrementado en la ventana",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 7,
+      "nombre": "Consistencia de resource entre traza, log y métrica por nube",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 8,
+      "nombre": "Prometheus: exemplars con trace_id de traza existente",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 9,
+      "nombre": "Límites de cardinalidad (CloudWatch/Cloud Monitoring/Prometheus)",
+      "estado": "SKIP",
+      "razon": "AWS no incluido (ejecutar con --include-aws)",
+      "detalles": {}
+    },
+    {
+      "id": 10,
+      "nombre": "Cloud Trace: traza W3C con spans de service-a y service-b",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "spans_service_a": [
+          "INSERT orders",
+          "INSERT orders",
+          "POST",
+          "POST /orders",
+          "POST /orders http receive",
+          "POST /orders http send",
+          "POST /orders http send",
+          "connect",
+          "inventory.reserve",
+          "order.persist",
+          "order.process",
+          "order.validate",
+          "payment.authorize"
+        ],
+        "spans_service_b": [
+          "POST /inventory/reserve",
+          "POST /inventory/reserve http receive",
+          "POST /inventory/reserve http send",
+          "POST /inventory/reserve http send",
+          "SELECT inventory",
+          "UPDATE inventory",
+          "connect",
+          "inventory.query",
+          "inventory.reserve",
+          "payment.gateway_call"
+        ],
+        "total_spans": 23,
+        "trace_id": "91559eeaf1d50df4195fcc44719bb552"
+      }
+    },
+    {
+      "id": 11,
+      "nombre": "Cloud Logging: ≥1 entrada con trace_id por servicio",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "entradas": 6,
+        "servicios": [
+          "service-a",
+          "service-b"
+        ],
+        "filtro": "timestamp>=\"2026-10-12T18:46:01Z\" AND trace:\"projects/otel-lab-obs-2610/traces/91559eeaf1d50df4195fcc44719bb552\""
+      }
+    },
+    {
+      "id": 12,
+      "nombre": "Cloud Monitoring: orders_created_total incrementado en la ventana",
+      "estado": "PASS",
+      "razon": "",
+      "detalles": {
+        "metric_type": "prometheus.googleapis.com/orders_created_total/counter",
+        "ventana_segundos": 240,
+        "series": 1,
+        "incremento_total": 1.0
+      }
+    },
+    {
+      "id": 13,
+      "nombre": "Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes",
+      "estado": "SKIP",
+      "razon": "A13 requiere --include-aws y --include-gcp simultaneos (trafico cruzando las nubes)",
+      "detalles": {}
+    }
+  ]
+}
