@@ -192,14 +192,39 @@ def test_postgres_env_matches_compose_and_init_scripts():
 
 def test_postgres_image_is_internal_with_baked_seed():
     """Fargate no admite bind-mount: postgres sale de ECR con init-scripts
-    horneados, no de la imagen publica pelada (sesion viva 2026-10-12)."""
+    horneados, no de la imagen publica pelada (sesion viva 2026-10-12).
+
+    Ronda 5 (bug 1, verificado en vivo): el `COPY .` con contexto raiz montaba
+    TODO el repo en /docker-entrypoint-initdb.d (solo DIRECTORIOS de primer
+    nivel, ningun .sh/.sql) → el entrypoint nunca ejecutaba el seed → sin DB
+    inventory → service-b 500 → A2 FAIL. El Dockerfile debe copiar los 3
+    scripts por RUTA EXPLICITA desde la raiz y fijar el bit de ejecucion del
+    .sh."""
     td = _task_def()
     pg = _containers(td)["postgres"]
     assert pg["image"].endswith("/otel-lab/postgres:__IMAGE_TAG__")
     assert "public.ecr.aws/docker/library/postgres" not in json.dumps(td)
     dockerfile = (ROOT / "deploy" / "aws" / "postgres.Dockerfile").read_text(encoding="utf-8")
     assert "FROM public.ecr.aws/docker/library/postgres:16-alpine" in dockerfile
-    assert re.search(r"COPY\s+\.\s+/docker-entrypoint-initdb\.d/", dockerfile)
+    # COPY explicito de los 3 scripts (no `COPY .`): invariante al contexto.
+    for script in ("01-init.sh", "01-orders-schema.sql", "02-inventory-db.sql"):
+        assert re.search(rf"COPY[^\n]*init-scripts/{script}", dockerfile), (
+            f"postgres.Dockerfile debe copiar init-scripts/{script} por ruta explicita"
+        )
+    assert re.search(r"RUN\s+chmod\s+\+x\s+/docker-entrypoint-initdb\.d/01-init\.sh", dockerfile)
+    assert not re.search(r"COPY\s+\.\s", dockerfile), (
+        "COPY . prohibido: arrastra el repo entero al directorio de init (bug 1, sesion viva)"
+    )
+
+
+def test_root_context_has_dockerignore():
+    """El unico build con contexto raiz (postgres) no debe arrastrar basura
+    (.git/.venv/__pycache__) al daemon de docker ni a capas futuras."""
+    ignore = (ROOT / ".dockerignore")
+    assert ignore.exists(), "falta .dockerignore en la raiz del repo"
+    text = ignore.read_text(encoding="utf-8")
+    for entry in (".git", ".venv", "__pycache__", ".env"):
+        assert entry in text, f".dockerignore debe excluir {entry!r}"
 
 
 def test_aws_push_builds_four_images():
@@ -212,7 +237,17 @@ def test_aws_push_builds_four_images():
     pushed = re.findall(r"docker push \S+/otel-lab/([a-z-]+):", block)
     assert sorted(pushed) == ["otel-collector", "postgres", "service-a", "service-b"]
     assert "deploy/aws/postgres.Dockerfile" in block
-    assert "init-scripts" in block
+    # Ronda 5 (bug 1): postgres se construye desde la RAIZ (el Dockerfile usa
+    # rutas init-scripts/... explicitas). Prohibido volver al contexto
+    # init-scripts/ + `COPY .`: cualquier otro contexto rompe el seed o
+    # arrastra el repo entero al directorio de init.
+    assert re.search(
+        r"docker build -t \S+/otel-lab/postgres:\$\(IMAGE_TAG\) "
+        r"-f deploy/aws/postgres\.Dockerfile \.\s*$",
+        block,
+        re.M,
+    ), "aws-push debe construir postgres con contexto raiz (.)"
+    assert "Dockerfile init-scripts" not in block
 
 
 def test_rendered_fixture_matches_template():
@@ -226,7 +261,7 @@ def test_rendered_fixture_matches_template():
         ("__AWS_ACCOUNT_ID__", "621236283643"),
         ("__AWS_REGION__", "us-east-1"),
         ("__ECR_REGISTRY__", "621236283643.dkr.ecr.us-east-1.amazonaws.com"),
-        ("__IMAGE_TAG__", "0.1.0"),
+        ("__IMAGE_TAG__", "0.1.3"),
         ("__INVENTORY_URL__", "http://localhost:8001"),
     ]:
         tpl = tpl.replace(token, value)
@@ -244,7 +279,7 @@ def test_makefile_exposes_aws_lifecycle_targets():
     assert required <= targets
     # el target `tunnel` murio con la sesion viva: SSM no porta-forward a Fargate
     assert "tunnel" not in targets
-    assert re.search(r"^IMAGE_TAG\s+\?=\s+0\.1\.0\s*$", text, re.M)
+    assert re.search(r"^IMAGE_TAG\s+\?=\s+0\.1\.3\s*$", text, re.M)
     # Ninguna imagen construida/pusheada usa :latest (los comentarios del
     # Makefile SI mencionan la palabra, asi que se mira el contexto de comando).
     assert not re.search(r"(?:build -t|push)\s+\S+:latest\b", text)
@@ -257,6 +292,31 @@ def test_collector_yaml_aws_targets_aws_backends():
     assert "xray:" in text  # pipeline de trazas tiene salida xray
     assert "emf:" in text   # pipeline de metricas tiene salida EMF
     assert "resourcedetection" in text and "ecs" in text
+    # Ronda 5 (bug 2, verificado en vivo): sin log_group_name explicito el
+    # exporter awsemf escribe en el default /metrics/{Namespace} y la task
+    # role (solo /otel/labs/*) lo rechaza con PutLogEvents 400 AccessDenied.
+    assert re.search(
+        r"awsemf:.*?log_group_name:\s*\"?/otel/labs/", text, re.S
+    ), "awsemf debe escribir EMF dentro de /otel/labs/* (politica de la task role)"
+    # awscloudwatchlogs (A5) tambien queda dentro de la politica.
+    assert re.search(
+        r"awscloudwatchlogs:.*?log_group_name:\s*\"?/otel/labs/", text, re.S
+    )
+    # Ronda 5 (A7): la metrica debe exponer la identidad de resource. Los
+    # resource attributes se convierten en labels y SOLO service.name /
+    # cloud.provider / deployment.environment se declaran como dimensiones
+    # (cardinalidad Acotada: 4 metricas x 1 set, A9 intacto).
+    assert "resource_to_telemetry_conversion" in text
+    assert re.search(
+        r"metric_declarations:.*?\[\[service\.name, cloud\.provider, deployment\.environment\]\]",
+        text,
+        re.S,
+    ), "awsemf debe declarar las dimensiones de resource para A7"
+    # Ronda 5 (cardinalidad, verificado en vivo): con el rollup default cada
+    # resource attribute adicional genera su propia serie (26 variantes).
+    assert "dimension_rollup_option: NoDimensionRollup" in text, (
+        "awsemf sin rollups: solo se publica el set de dimensiones declarado"
+    )
 
 
 def test_access_helper_replaces_broken_tunnel():

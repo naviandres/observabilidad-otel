@@ -31,7 +31,7 @@
         "startPeriod": 10,
         "timeout": 5
       },
-      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-a:0.1.0",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-a:0.1.3",
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
@@ -80,7 +80,7 @@
         "startPeriod": 10,
         "timeout": 5
       },
-      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-b:0.1.0",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-b:0.1.3",
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
@@ -129,7 +129,7 @@
         "startPeriod": 10,
         "timeout": 5
       },
-      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/postgres:0.1.0",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/postgres:0.1.3",
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
@@ -167,7 +167,7 @@
         }
       ],
       "essential": true,
-      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/otel-collector:0.1.0",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/otel-collector:0.1.3",
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {

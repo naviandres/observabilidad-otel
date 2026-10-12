@@ -30,7 +30,7 @@ AWS_REGION      ?= us-east-1
 AWS_ACCOUNT_ID  ?= 621236283643
 AWS_PROFILE     ?= otel-lab
 ECR_REGISTRY    ?= $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-IMAGE_TAG       ?= 0.1.0
+IMAGE_TAG       ?= 0.1.3
 ECS_CLUSTER     ?= otel-lab
 ECS_SERVICE     ?= otel-lab
 ECS_TASK_FAMILY ?= otel-lab
@@ -229,7 +229,7 @@ aws-push:
 	docker push $(ECR_REGISTRY)/otel-lab/service-b:$(IMAGE_TAG)
 	docker build -t $(ECR_REGISTRY)/otel-lab/otel-collector:$(IMAGE_TAG) -f deploy/collector/otelcol-contrib.dockerfile deploy/collector
 	docker push $(ECR_REGISTRY)/otel-lab/otel-collector:$(IMAGE_TAG)
-	docker build -t $(ECR_REGISTRY)/otel-lab/postgres:$(IMAGE_TAG) -f deploy/aws/postgres.Dockerfile init-scripts
+	docker build -t $(ECR_REGISTRY)/otel-lab/postgres:$(IMAGE_TAG) -f deploy/aws/postgres.Dockerfile .
 	docker push $(ECR_REGISTRY)/otel-lab/postgres:$(IMAGE_TAG)
 
 # aws-start — red + cluster (si falta) + task definition render/register +
