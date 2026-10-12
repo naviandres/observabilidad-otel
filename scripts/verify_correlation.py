@@ -6,8 +6,9 @@ signals, in each cloud it was asked to check:
 
 * ``--include-aws``  -> X-Ray (A3, A4), CloudWatch Logs (A5), CloudWatch
   metrics via EMF (A6), resource consistency across the three AWS signals
-  (A7), Prometheus exemplars scraped from the collector's :8889 exporter
-  reached through the operator's temporary ingress (A8) and the
+  (A7), Prometheus exemplars from the APP-LEVEL latency histogram scraped in
+  OpenMetrics at :8000/metrics — the collector's :8889 exporter does not
+  propagate OTLP exemplars (A8, documented in docs/aws-ecs.md) — and the
   cardinality limits (A9). AWS calls go through boto3 (lazy import: local
   mode and offline tests never need the SDK installed).
 * ``--include-gcp``  -> Cloud Trace (A10), Cloud Logging (A11), Cloud
@@ -115,7 +116,14 @@ PROM_SERIES_LIMIT = 1500
 # is NOT available (rejected live 2026-10-12), so the AWS run reaches it on the
 # task's public ENI IP (:8889) after `make aws-access-grant` — the default here
 # matches the local compose stack, which exposes the same port on localhost.
+# A8 runs on the APP-LEVEL scrape instead (http://<task>:8000/metrics): the
+# collector's exporter does not propagate OTLP exemplars (docs/aws-ecs.md),
+# while the app's native histogram exposes them in OpenMetrics.
 DEFAULT_PROMETHEUS_URL = "http://localhost:8889/metrics"
+# Exemplars only exist in the OpenMetrics exposition (the Prometheus text
+# format drops them). Ask for it explicitly; scrapes that ignore the header
+# (the collector's :8889) simply come back without exemplars.
+OPENMETRICS_ACCEPT = "application/openmetrics-text; version=1.0.0; charset=utf-8"
 
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-01$")
@@ -1493,11 +1501,14 @@ def run_aws_assertions(
             7, FAIL, razon=f"comprobacion A7 no evaluable ({type(exc).__name__}): {exc}"
         )
 
-    # --- A8 / A9: Prometheus scrape (:8889 via public ENI after grant) ------
+    # --- A8 / A9: Prometheus scrape (app :8000 for A8 exemplars, or the
+    # collector :8889 — both via the task's public ENI after the grant) ------
     scrape_text: str | None = None
     scrape_error: str | None = None
     try:
-        _status, _headers, body = http_request("GET", args.prometheus_url)
+        _status, _headers, body = http_request(
+            "GET", args.prometheus_url, headers={"Accept": OPENMETRICS_ACCEPT}
+        )
         scrape_text = body if isinstance(body, str) else json.dumps(body)
     except API_ERRORS as exc:  # urllib + HttpError: reaching it is the operator's job
         scrape_error = f"scrape Prometheus fallo ({args.prometheus_url}): {exc}"
@@ -1514,7 +1525,8 @@ def run_aws_assertions(
         report.register(
             8, FAIL,
             razon="la metrica de latencia no expone exemplars con trace_id en el scrape "
-            "(activar exemplars en el exporter prometheus del collector)",
+            "(el exporter prometheus del collector no propaga exemplars: usar "
+            "--prometheus-url http://<task-ip>:8000/metrics, ver docs/aws-ecs.md)",
             detalles={"series": series_count},
         )
     else:
@@ -1781,7 +1793,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--prometheus-url", default=DEFAULT_PROMETHEUS_URL,
-        help="collector Prometheus scrape endpoint (task public ENI :8889 after aws-access-grant for the AWS run)",
+        help="Prometheus scrape endpoint (A8/A9). For the AWS run point it at the APP "
+        "metrics on the task public ENI, http://<ip>:8000/metrics, so the OpenMetrics "
+        "exemplars are scraped; the collector default (:8889) never carries them.",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help="GCP project id")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW_SECONDS, help="read window in seconds")

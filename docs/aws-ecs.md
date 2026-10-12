@@ -247,3 +247,81 @@ la task; es la única interfaz que SSM sí soporta aquí.
   `/otel-lab/database-url/{service-a,service-b}` (valores en §3 ronda 2) y
   bucket S3 del guard de coste: **esto** es lo que bloquea el encendido en la
   nube, no el código.
+
+## 7. ADR: A8 (exemplars) se cierra a nivel de aplicación, no en el collector
+
+**Estado:** aceptado (2026-10-12). **Alcance:** aserción A8 de PLAN §3.A
+(exemplar de métrica de latencia → traza) y el scrape de `verify_correlation.py`.
+
+### Contexto (por qué no la vía "collector")
+
+- El SDK OTel **sí** manda exemplars con `trace_id`/`span_id` en los
+  histogramas (verificado en vivo 2026-10-12 con el debug exporter del
+  collector).
+- Pero el **exporter prometheus del collector NO los propaga** al scrape
+  `:8889`: probado con ADOT v0.46.0 (core v0.141) y contrib 0.162.0, con y sin
+  `enable_open_metrics: true` y `send_timestamps: true` — salida sin exemplars.
+- El `opentelemetry-exporter-prometheus` del SDK tampoco los mapea, y servir
+  métricas OTel por dos vías rompería la guarda de cardinalidad (A9).
+
+### Decisión
+
+Cada servicio instrumenta **una** métrica de latencia de negocio con
+`prometheus_client` nativo (`service-*/app/latency.py`, módulos idénticos):
+
+- Histogram `http_server_duration_milliseconds`, labels **solo**
+  `service_name` y `outcome` (`success|error`) — 2 labels, cardinalidad baja;
+  buckets 5 ms…10 s.
+- En cada `POST /orders` (service-a) y `POST /inventory/reserve` (service-b)
+  se observa la duración en un `finally` con
+  `exemplar={"trace_id": <32hex>, "span_id": <16hex>}` leído del **span OTel
+  activo** (`opentelemetry.trace.get_current_span()`); sin span válido no se
+  emite exemplar (nada de ceros engañosos).
+- `GET /metrics` negocia por cabecera `Accept`:
+  `application/openmetrics-text` → exposición **OpenMetrics** (la única que
+  puede llevar exemplars — el texto plan, `version=0.0.4` y el nuevo
+  `text/plain; version=1.0.0` de prometheus_client 0.26, los **descarta**);
+  sin esa cabecera responde el texto de siempre (health-check y consumidores
+  actuales intactos).
+- `verify_correlation.py` pide OpenMetrics en el scrape de A8/A9. Para que
+  A8 pase, la corrida debe apuntar `--prometheus-url` al scrape de la **app**:
+  `http://<IP_TASK>:8000/metrics` (el default `:8889` queda para A9/local).
+
+**Formato exacto emitido** (captura real de `generate_latest` en venv,
+prometheus-client 0.26.0; exemplar INLINE, no existe variante `# EXAMPLE` en
+líneas separadas):
+
+```
+http_server_duration_milliseconds_bucket{le="100.0",outcome="success",service_name="service-a"} 1.0 # {span_id="b2c741ec84e3a5cd",trace_id="d1f9af45eee92faf57d88aa4b54b0f8f"} 52.59709998790645 1791836484.6327386
+```
+
+Este histograma es **el puente exemplar→traza, no un sustituto**: las métricas
+OTel de negocio (`orders_created_total`, etc.) siguen viajando por OTLP →
+collector → EMF/GCP para A6/A7/A12 sin ningún cambio. El patrón es "exemplares
+en el scrape de la app"; la limitación del exporter del collector queda
+documentada arriba como motivo, no como destino.
+
+### Consecuencias
+
+- A8 pasa a depender del scrape de la app (:8000), accesible por el mismo
+  grant /32 que ya abre 8000 y 8889 (§5).
+- Cardinilidad app-level: 12 buckets + count/sum/created por combinación de
+  `outcome` (≤2) por servicio → decenas de series, muy por debajo del límite
+  A9 (1500).
+- Paridad service-a/service-b fijada por test byte-a-byte
+  (`tests/test_exemplar_metrics.py`).
+
+### Runbook de la mini-sesión AWS (cerrar A8 en vivo, coste ~$0.05)
+
+1. `make aws-start` con desired=1 (o `aws ecs update-service --desired-count 1`).
+2. `pwsh scripts/access.ps1 -Action grant` (o `make aws-access-grant`) → IP del
+   operador + `<IP_TASK>` del ENI.
+3. `POST http://<IP_TASK>:8000/orders` con un `traceparent` conocido
+   (payload canónico del script); repetir 2-3 veces para poblar buckets.
+4. `python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000
+   --include-aws --prometheus-url http://<IP_TASK>:8000/metrics`
+   → meta: **A8 PASS** (exemplar → BatchGetTraces en X-Ray). Equivalente:
+   `make verify-correlation-aws VERIFY_ENDPOINT=http://<IP_TASK>:8000 PROM_URL=http://<IP_TASK>:8000/metrics`.
+5. `pwsh scripts/access.ps1 -Action revoke` y `make aws-stop` (verificar
+   desired=0). Registrar coste de la sesión (< $1; 1 tarea e2-medium ~15 min
+   ≈ $0.01-0.05).

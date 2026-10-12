@@ -314,14 +314,17 @@ queda probado offline):
    make aws-access-grant   # regla /32 temporal 8000+8889; imprime <IP_TASK> del ENI
                            # (si el CLI no la imprime, resolver Association.PublicIp
                            # con boto3 — ver docs/aws-ecs.md §2 nota camelCase)
-   python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
-     --include-aws --prometheus-url http://<IP_TASK>:8889/metrics
-   ```
+    python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
+      --include-aws --prometheus-url http://<IP_TASK>:8000/metrics
+    #   (A8 exige el scrape APP-LEVEL :8000 — los exemplars solo existen en la
+    #    exposicion OpenMetrics de la app; el exporter prom del collector :8889
+    #    no los propaga, ver docs/aws-ecs.md §7)
+    ```
 3. **Cruce dual** (cierra A13 con el MISMO trace en ambas nubes):
    ```powershell
    make aws-start INVENTORY_URL=http://<LB_IP>:8001   # update-service: service-a(ECS)->service-b(GKE)
-   python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
-     --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8889/metrics
+    python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
+      --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8000/metrics
    ```
    A13 exige ambas banderas: el MISMO `trace_id` inyectado debe aparecer en una
    señal AWS (X-Ray por estructura — R-03 — o CloudWatch Logs del exportador

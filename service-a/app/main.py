@@ -7,15 +7,18 @@ Thin FastAPI layer: telemetry/metrics setup, auto-instrumentation gated by
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+from prometheus_client.openmetrics.exposition import CONTENT_TYPE_LATEST as OPENMETRICS_CONTENT_TYPE
+from prometheus_client.openmetrics.exposition import generate_latest as generate_latest_openmetrics
 
 from app.database import engine
+from app.latency import observe_business_request, timer
 from app.metrics import configure_metrics
 from app.models import CreateOrderRequest
 from app.orders import process_order
@@ -57,9 +60,20 @@ inventory_client = InventoryClient(INVENTORY_SERVICE_URL)
 # GET /metrics
 # ============================================================
 
+# A8 bridge (app/latency.py): the exemplars that link metric bucket -> trace
+# only exist in the OpenMetrics exposition, so the endpoint negotiates on the
+# Accept header. Clients that do not ask for OpenMetrics (health check, plain
+# curl) keep receiving the default text format, exactly as before.
+OPENMETRICS_ACCEPT = "application/openmetrics-text"
+
 
 @app.get("/metrics")
-def metrics_endpoint():
+def metrics_endpoint(request: Request):
+    if OPENMETRICS_ACCEPT in request.headers.get("accept", ""):
+        return Response(
+            content=generate_latest_openmetrics(REGISTRY),
+            media_type=OPENMETRICS_CONTENT_TYPE,
+        )
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -84,8 +98,16 @@ def _active_trace_id() -> str | None:
 
 @app.post("/orders")
 async def create_order(request: CreateOrderRequest, response: Response):
-    trace_id = _active_trace_id()
-    if trace_id is not None:
-        # PLAN §3.A assertion 2: edge-to-edge W3C trace id in the response.
-        response.headers["x-trace-id"] = trace_id
-    return await process_order(request, inventory_client, engine=engine)
+    started = timer()
+    outcome = "error"
+    try:
+        trace_id = _active_trace_id()
+        if trace_id is not None:
+            # PLAN §3.A assertion 2: edge-to-edge W3C trace id in the response.
+            response.headers["x-trace-id"] = trace_id
+        result = await process_order(request, inventory_client, engine=engine)
+        outcome = "success"
+        return result
+    finally:
+        # A8 bridge: one observation per request, exemplar = active OTel ids.
+        observe_business_request("service-a", outcome, started)

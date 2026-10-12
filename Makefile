@@ -49,6 +49,12 @@ INVENTORY_URL   ?= http://localhost:8001
 # --- Verificacion de correlacion (PLAN 3.A) ---------------------------------
 PYTHON          ?= python3
 VERIFY_ENDPOINT ?= http://localhost:8080
+# PROM_URL: endpoint del scrape Prometheus de A8/A9. Default: collector :8889
+# (compose local). Para que A8 pase usar el scrape APP-LEVEL de service-a
+# (http://<ip>:8000/metrics, OpenMetrics con exemplars; el exporter prom del
+# collector no propaga exemplars — ver docs/aws-ecs.md). Ej.:
+#   make verify-correlation-aws PROM_URL=http://<IP_TASK>:8000/metrics
+PROM_URL        ?= http://localhost:8889/metrics
 
 AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
 
@@ -338,9 +344,10 @@ validate-collector:
 #   verify-correlation-gcp      + Cloud Trace/Logging/Monitoring (ADC gcloud)
 #   verify-correlation-aws      + X-Ray/CloudWatch (boto3, perfil otel-lab)
 #   verify-correlation-dual     ambas banderas: evalua la asercion cruzada A13
-# El scrape Prometheus de A8/A9 va a --prometheus-url (default :8889): en la
-# sesion AWS se alcanza por la IP publica del ENI de la task tras
-# `make aws-access-grant` (usa `make aws-verify`, que ya resuelve la IP).
+# El scrape Prometheus de A8/A9 va a --prometheus-url ($(PROM_URL), default
+# :8889): en la sesion AWS se alcanza por la IP publica del ENI de la task tras
+# `make aws-access-grant`. Para que A8 (exemplars) pase, apunta PROM_URL al
+# scrape app-level: PROM_URL=http://<IP_TASK>:8000/metrics (ver docs/aws-ecs.md).
 # ===========================================================================
 
 verify-correlation:
@@ -350,7 +357,8 @@ verify-correlation-gcp:
 	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) --include-gcp
 
 verify-correlation-aws:
-	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) --include-aws
+	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) --include-aws \
+	  --prometheus-url $(PROM_URL)
 
 verify-correlation-dual:
 	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) \

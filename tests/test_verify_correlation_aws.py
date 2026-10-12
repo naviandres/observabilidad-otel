@@ -188,6 +188,37 @@ def test_parse_prometheus_scrape_ignores_non_latency_exemplars(vc):
     assert exemplars == {}
 
 
+def test_parse_prometheus_scrape_reads_native_openmetrics_body(vc):
+    """Cuerpo REAL capturado a generate_latest de prometheus_client 0.26.0
+    (exemplar INLINE ` # {labels} valor ts`, lineas _created y `# EOF`).
+    El parser del script lo recoge sin ampliacion: el formato '# EXAMPLE' en
+    linea aparte NO existe en esta version (verificado empiricamente)."""
+    tid = "ab" * 16
+    sid = "b" * 16
+    exemplar_bucket_line = (
+        'http_server_duration_milliseconds_bucket{le="50.0",outcome="success",'
+        f'service_name="service-a"}} 1.0 # {{span_id="{sid}",trace_id="{tid}"}} '
+        "42.0 1791835781.6181953"
+    )
+    text = "\n".join(
+        [
+            "# HELP http_server_duration_milliseconds Business latency bridge",
+            "# TYPE http_server_duration_milliseconds histogram",
+            'http_server_duration_milliseconds_bucket{le="5.0",outcome="success",'
+            'service_name="service-a"} 0.0',
+            exemplar_bucket_line,
+            'http_server_duration_milliseconds_count{outcome="success",'
+            'service_name="service-a"} 1.0',
+            'http_server_duration_milliseconds_created{outcome="success",'
+            'service_name="service-a"} 1.7918357816181953e+09',
+            "# EOF",
+        ]
+    )
+    series, exemplars = vc.parse_prometheus_scrape(text)
+    assert series == 4  # HELP/TYPE/EOF no cuentan como series
+    assert exemplars == {"http_server_duration_milliseconds_bucket": [tid]}
+
+
 def test_dimensions_to_attributes_maps_servicename(vc):
     dims = [
         {"Name": "ServiceName", "Value": "service-a"},
@@ -504,6 +535,25 @@ def test_aws_mode_no_exemplars_fails_a8(vc, monkeypatch, tmp_path):
     row = _assertion(_read(json_path), 8)
     assert row["estado"] == "FAIL"
     assert "exemplars" in row["razon"]
+
+
+def test_aws_mode_scrape_requests_openmetrics_accept(vc, monkeypatch, tmp_path):
+    """A8 solo existe en la exposicion OpenMetrics: el scrape debe pedirla
+    por cabecera Accept (el texto plan descarta los exemplars)."""
+    _wire_aws(vc, monkeypatch)
+    seen_headers: list[dict[str, str]] = []
+
+    def transport(method, url, headers=None, body=None, timeout=15.0):
+        if "8889" in url:
+            seen_headers.append(dict(headers or {}))
+            return 200, {}, _scrape_text()
+        return 200, {"x-trace-id": FIXED_TRACE_ID}, {"status": "created"}
+
+    _run_aws_main(
+        vc, monkeypatch, tmp_path, extra_args=["--include-aws"], transport=transport
+    )
+    assert seen_headers, "el scrape Prometheus no ocurrio"
+    assert "application/openmetrics-text" in seen_headers[0].get("Accept", "")
 
 
 def test_aws_mode_scrape_down_fails_a8_and_a9(vc, monkeypatch, tmp_path):
