@@ -10,7 +10,6 @@
     "operatingSystemFamily": "LINUX",
     "cpuArchitecture": "X86_64"
   },
-  "enableExecuteCommand": true,
   "volumes": [
     {
       "name": "postgres-data"
@@ -28,11 +27,12 @@
       "cpu": 256,
       "memoryReservation": 384,
       "portMappings": [
-        { "containerPort": 8080, "hostPort": 8080, "protocol": "tcp" }
+        { "containerPort": 8000, "hostPort": 8000, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
-        { "name": "SERVICE_B_URL", "value": "http://localhost:8081/api/service-b" },
+        { "name": "SERVICE_B_URL", "value": "http://localhost:8001/api/service-b" },
+        { "name": "INVENTORY_SERVICE_URL", "value": "http://localhost:8001" },
         { "name": "OTEL_SERVICE_NAME", "value": "service-a" }
       ],
       "secrets": [
@@ -44,7 +44,7 @@
       "healthCheck": {
         "command": [
           "CMD-SHELL",
-          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=5)\" || exit 1"
+          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/metrics',timeout=5)\" || exit 1"
         ],
         "interval": 30,
         "timeout": 5,
@@ -68,7 +68,7 @@
       "cpu": 256,
       "memoryReservation": 384,
       "portMappings": [
-        { "containerPort": 8081, "hostPort": 8081, "protocol": "tcp" }
+        { "containerPort": 8001, "hostPort": 8001, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
@@ -83,7 +83,7 @@
       "healthCheck": {
         "command": [
           "CMD-SHELL",
-          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8081/health',timeout=5)\" || exit 1"
+          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8001/metrics',timeout=5)\" || exit 1"
         ],
         "interval": 30,
         "timeout": 5,
@@ -146,7 +146,7 @@
       "essential": true,
       "cpu": 256,
       "memoryReservation": 512,
-      "command": ["--config=file:/cfg/otel-collector-aws.yaml"],
+      "command": ["--config=/etc/otelcol/config.yaml"],
       "environment": [
         { "name": "AWS_REGION", "value": "__AWS_REGION__" }
       ],

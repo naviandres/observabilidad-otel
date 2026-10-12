@@ -23,8 +23,8 @@ IAM_TASK_ROLE = ROOT / "deploy" / "aws" / "iam" / "task-role-policy.json"
 
 CONTAINERS = {"service-a", "service-b", "postgres", "otel-collector", "cloudwatch-agent"}
 EXPECTED_PORTS = {
-    "service-a": {8080},
-    "service-b": {8081},
+    "service-a": {8000},
+    "service-b": {8001},
     "otel-collector": {4317},
 }
 
@@ -77,7 +77,56 @@ def test_roles_and_exec_command():
     assert "otel-lab-exec-ecs" in td["executionRoleArn"]
     assert "otel-lab-task-ecs" in td["taskRoleArn"]
     assert "__AWS_ACCOUNT_ID__" in td["taskRoleArn"]
-    assert td["enableExecuteCommand"] is True
+    # `enableExecuteCommand` NO es campo valido de register-task-definition
+    # (validation error). ECS Exec se activa en create/update-service con
+    # `--enable-execute-command`, que el Makefile ya pasa.
+    assert "enableExecuteCommand" not in td
+    make_text = MAKEFILE.read_text(encoding="utf-8")
+    assert "--enable-execute-command" in make_text
+
+
+def test_ports_match_dockerfiles():
+    """containerPort == EXPOSE/CMD --port del Dockerfile (8000/8001 reales)."""
+    containers = _containers(_task_def())
+    for name, port in (("service-a", 8000), ("service-b", 8001)):
+        docker_text = (ROOT / name / "Dockerfile").read_text(encoding="utf-8")
+        assert f"EXPOSE {port}" in docker_text, f"{name} no expone {port}"
+        assert f"--port {port}" in docker_text or f'"--port", "{port}"' in docker_text, (
+            f"{name} no arranca uvicorn en {port}"
+        )
+        for pm in containers[name]["portMappings"]:
+            assert pm["containerPort"] == port
+            assert pm["hostPort"] == port
+
+
+def test_health_checks_probe_metrics_not_health():
+    """Los servicios no tienen /health; el healthCheck sonda /metrics propio."""
+    containers = _containers(_task_def())
+    for name, port in (("service-a", 8000), ("service-b", 8001)):
+        cmd = " ".join(containers[name]["healthCheck"]["command"])
+        assert f"http://localhost:{port}/metrics" in cmd, f"{name} no sondia /metrics"
+        assert "/health" not in cmd, f"{name} sigue apuntando a /health inexistente"
+
+
+def test_service_a_reaches_service_b_via_localhost():
+    """awsvpc = mismo netns: service-a llama a service-b por localhost:8001."""
+    svc_a = _containers(_task_def())["service-a"]
+    env = {e["name"]: e["value"] for e in svc_a["environment"]}
+    assert env["SERVICE_B_URL"] == "http://localhost:8001/api/service-b"
+    # la app lee INVENTORY_SERVICE_URL (app/main.py); sin esto cae al default
+    # `http://service-b:8001`, inresoluble dentro de la task Fargate.
+    assert env["INVENTORY_SERVICE_URL"] == "http://localhost:8001"
+
+
+def test_collector_command_uses_baked_config_path():
+    """El Dockerfile hornea la config en /etc/otelcol/config.yaml; el command
+    debe apuntar a esa ruta, no a /cfg/... (no existe en la imagen)."""
+    collector = _containers(_task_def())["otel-collector"]
+    assert collector["command"] == ["--config=/etc/otelcol/config.yaml"]
+    docker_text = (
+        ROOT / "deploy" / "collector" / "otelcol-contrib.dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "COPY otel-collector-aws.yaml /etc/otelcol/config.yaml" in docker_text
 
 
 def test_all_containers_use_awslogs_driver():
@@ -164,7 +213,8 @@ def _policy_actions(policy):
 
 
 def test_task_role_grants_ecs_exec_ssmmessages():
-    """`enableExecuteCommand` exige ssmmessages en la task role (ECS Exec)."""
+    """ECS Exec (`--enable-execute-command` en create-service) exige
+    ssmmessages en la task role."""
     policy = json.loads(IAM_TASK_ROLE.read_text(encoding="utf-8"))
     actions = _policy_actions(policy)
     required = {

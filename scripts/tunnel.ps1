@@ -15,9 +15,9 @@
 .PARAMETER Profile
     Perfil de credenciales AWS (default: otel-lab).
 .PARAMETER Ports
-    Puertos locales == puertos de contenedor (default: 8080,8081,4317).
+    Puertos locales == puertos de contenedor (default: 8000,8001,4317).
 .EXAMPLE
-    .\scripts\tunnel.ps1 -Ports 8080,8081,4317
+    .\scripts\tunnel.ps1 -Ports 8000,8001,4317
 #>
 [CmdletBinding()]
 param(
@@ -25,7 +25,7 @@ param(
     [string]$Service = "otel-lab",
     [string]$Region = "us-east-1",
     [string]$Profile = "otel-lab",
-    [int[]]$Ports = @(8080, 8081, 4317)
+    [int[]]$Ports = @(8000, 8001, 4317)
 )
 
 $ErrorActionPreference = "Stop"

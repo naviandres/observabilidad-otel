@@ -44,9 +44,9 @@ make aws-push                      # ECR login + build + push (3 imágenes)
 make aws-start
 
 # 3) disponer del túnel (EC2 → SSM Session Manager → ECS Exec):
-make tunnel                        # service-a:8080, service-b:8081, collector 4317
+make tunnel                        # service-a:8000, service-b:8001, collector 4317
 
-# 4) smoke: POST localhost:8080/orders → traza en X-Ray, logs en CloudWatch
+# 4) smoke: POST localhost:8000/orders → traza en X-Ray, logs en CloudWatch
 
 # 5) parar (no borra nada; desired_count=0 = sin cómputo):
 make aws-stop
@@ -60,8 +60,8 @@ make aws-net-destroy               # borra la red tagueada (opcional, $0)
 
 | Container | Imagen | Puertos | Función |
 |---|---|---|---|
-| service-a | ECR `otel-lab/service-a:<tag>` | 8080 | API principal, trazas OTLP → collector |
-| service-b | ECR `otel-lab/service-b:<tag>` | 8081 | API de inventario, trazas OTLP → collector |
+| service-a | ECR `otel-lab/service-a:<tag>` | 8000 | API principal, trazas OTLP → collector |
+| service-b | ECR `otel-lab/service-b:<tag>` | 8001 | API de inventario, trazas OTLP → collector |
 | postgres | `public.ecr.aws/docker/library/postgres:16-alpine` | 5432 | DB transaccional (volumen nombrado `postgres-data`) |
 | otel-collector | ECR `otel-lab/otel-collector:<tag>` (ADOT 0.46.0 + YAML AWS) | 4317 | OTLP/gRPC; exporta X-Ray + EMF + logs |
 | cloudwatch-agent | `public.ecr.aws/cloudwatch-agent/cloudwatch-agent:1.300073.0b1828` | — | métricas ECS; config vía SSM, `essential:false` |
@@ -93,6 +93,37 @@ Rollos de los roles:
   (secret del CW agent).
 - **task** (`otel-lab-task-ecs`): `xray:PutTraceSegments`, `xray:PutTelemetryRecords`,
   `cloudwatch:PutMetricData`, `ssmmessages:*` (ECS Exec).
+
+### Contratos verificados en sesión real (fixes ya incorporados al template)
+
+La primera sesión Fargate end-to-end obligó a corregir el template. Estos
+contratos quedan fijados por `tests/test_ecs_deliverable.py`:
+
+- **Puertos reales.** `service-a` escucha en **8000** y `service-b` en **8001**
+  (lo dictan sus Dockerfiles: `EXPOSE`/`uvicorn --port`); los `containerPort`
+  y `hostPort` del template coinciden. El acceso por túnel y el smoke usan
+  esos puertos.
+- **Health checks sobre `/metrics`.** Ningún servicio expone `/health`; ambos
+  exponen `/metrics` (FastAPI + Prometheus client), así que el `healthCheck`
+  sondea `http://localhost:<puerto>/metrics` con `urllib`.
+- **Llamada service-a → service-b.** Con `awsvpc` los contenedores comparten
+  namespace de red: no hay DNS de servicio, se llama por **localhost**. La app
+  lee `INVENTORY_SERVICE_URL` (default `http://service-b:8001`, válido solo en
+  docker-compose), por lo que el template fija
+  `INVENTORY_SERVICE_URL=http://localhost:8001`; `SERVICE_B_URL` se conserva
+  como referencia documentada del endpoint.
+- **ECS Exec no es campo de la task definition.** `enableExecuteCommand` **no**
+  es un campo válido de `register-task-definition` (falla la validación). El
+  comando del target `aws-start` lo aplica en `create-service`/`update-service`
+  con `--enable-execute-command`, que es donde corresponde.
+- **Ruta de config del collector.** La imagen hornea el YAML en
+  `/etc/otelcol/config.yaml` (`otelcol-contrib.dockerfile`), por lo que el
+  `command` del contenedor es `--config=/etc/otelcol/config.yaml` (no
+  `file:/cfg/...`, ruta que no existe en la imagen).
+- **Notas operativas.** La subnet pública necesita
+  `ModifySubnetAttribute --map-public-ip-on-launch true` (permiso de IAM que
+  corresponde al humano de la Fase 0), y `make tunnel` exige
+  `session-manager-plugin` en el `PATH`.
 
 ## 4. Coste y verificación
 
