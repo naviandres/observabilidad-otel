@@ -421,7 +421,7 @@ def _otlp_log_entry(service: str, trace: str) -> dict[str, Any]:
 
 
 def test_cloud_logging_otlp_service_name_label_attribution(vc, monkeypatch, tmp_path, gcp_enabled):
-    """A11 con la pata OTLP: textPayload + labels.service.name + trace."""
+    """A11 con la vertiente OTLP: textPayload + labels.service.name + trace."""
     entries = [_otlp_log_entry("service-a", "t"), _otlp_log_entry("service-b", "t")]
     transport = _gcp_transport(
         trace_spans=[_span("order.process"), _span("inventory.query")],

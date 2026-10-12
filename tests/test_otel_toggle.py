@@ -60,7 +60,7 @@ def test_metric_export_interval_defaults_to_five_seconds(monkeypatch):
     """Ronda 6 (A12): sin OTEL_METRIC_EXPORT_INTERVAL el reader sigue a 5 s.
 
     El pipeline EMF de AWS (CloudWatch) si acepta escrituras cada 5 s; el
-    default del modulo no cambia para no tocar esa pata.
+    default del modulo no cambia para no tocar ese lado.
     """
     monkeypatch.delenv("OTEL_METRIC_EXPORT_INTERVAL", raising=False)
     provider = telemetry._build_meter_provider(telemetry._build_resource("service-a"), None)

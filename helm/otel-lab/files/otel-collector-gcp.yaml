@@ -53,7 +53,7 @@ receivers:
       memory:
       processes:
   # Fuente del pipeline de logs. La app emite structlog JSON a stdout Y exporta
-  # logs por OTLP (telemetry.py LoggingHandler, A11); filelog es la pata de
+  # logs por OTLP (telemetry.py LoggingHandler, A11); filelog es la vertiente de
   # respaldo del platform log (stdout del nodo). El collector
   # lee el stdout de los pods del NODO (cluster single-node) y lo sube a Cloud
   # Logging con el trace_id normalizado en logging.googleapis.com/trace

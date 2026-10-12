@@ -110,7 +110,7 @@ def test_disabled_engine_adds_no_otlp_handler(monkeypatch):
 
 def test_enabled_engine_installs_otlp_handler_alongside_stdout(monkeypatch):
     """El sink stdout (structlog JSON) se conserva; el OTLP es un SEGUNDO
-    camino, no un reemplazo (la pata GCP filelog depende del stdout)."""
+    camino, no un reemplazo (el lado GCP filelog depende del stdout)."""
     monkeypatch.delenv("OTEL_ENABLED", raising=False)
     root = logging.getLogger()
     before = list(root.handlers)
