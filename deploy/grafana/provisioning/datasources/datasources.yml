@@ -9,6 +9,13 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    # PLAN 3.B: el click sobre un exemplar de un panel de metricas abre la
+    # traza. linkedDatasourceUid apunta al Tempo provisionado por
+    # datasources-cloud.yml; sin ese datasource (modo 100% local, decision
+    # del hub) el boton de exemplar queda inactivo y el waterfall se
+    # consulta en Jaeger (uid jaeger, abajo).
+    jsonData:
+      linkedDatasourceUid: tempo
 
   # Jaeger datasource ships with Grafana OSS; if the plugin is missing in a
   # given Grafana build, provisioning logs a warning and the rest still loads.
