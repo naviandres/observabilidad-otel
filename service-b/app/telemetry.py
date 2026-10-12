@@ -6,8 +6,16 @@ only switch: when it is ``false`` no OTLP exporter is created for any signal
 and the returned tracer/meter are no-ops, so no span is recorded. This makes
 the A/B benchmark honest: same binary, flag on/off.
 
-``configure_telemetry`` accepts optional ``span_exporter``/``metric_reader``
-arguments so tests can wire in-memory exporters without touching the network.
+``configure_telemetry`` accepts optional ``span_exporter``/``metric_reader``/
+``log_exporter`` arguments so tests can wire in-memory exporters without
+touching the network.
+
+Logs travel on two paths (PLAN §1 anticipated ``opentelemetry-instrumentation-
+logging``; wired directly on the SDK here): stdout keeps the structlog JSON
+line for the platform log driver / GKE filelog, and the OTLP ``LoggingHandler``
+exports every stdlib record to the collector so the ``awscloudwatchlogs`` /
+googlecloud log exporters receive it with the active span's ``trace_id``
+(assertion A5/A11 correlation).
 """
 
 from __future__ import annotations
@@ -18,8 +26,12 @@ from typing import Optional
 
 import structlog
 from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import MetricReader, PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
@@ -96,9 +108,11 @@ def build_json_formatter() -> structlog.stdlib.ProcessorFormatter:
 def configure_logging(service_name: str, level: int = logging.INFO) -> logging.Logger:
     """Route structlog JSON records through stdlib logging.
 
-    structlog renders to JSON; a single :class:`logging.StreamHandler` on the
-    root logger is the only sink. This keeps one log path (no double count)
-    and lets ``trace_id``/``span_id`` be injected by the OTel-aware processor.
+    structlog renders to JSON; a :class:`logging.StreamHandler` on the root
+    logger is the stdout sink (platform log driver / GKE filelog path).
+    ``configure_telemetry`` may add a second sink (the OTLP
+    ``LoggingHandler``) when OpenTelemetry is enabled — the JSON body stays
+    the same, and the OTLP record carries the active span's trace_id.
     """
     shared_processors = [
         structlog.contextvars.merge_contextvars,
@@ -155,11 +169,45 @@ def _build_meter_provider(
     return MeterProvider(resource=resource, metric_readers=[reader])
 
 
+def _build_logger_provider(
+    resource: Resource, log_exporter: Optional[LogExporter]
+) -> LoggerProvider:
+    """LoggerProvider that ships every LogRecord to the collector over OTLP.
+
+    ``BatchLogRecordProcessor`` keeps the hot path cheap (the HTTP request
+    never waits on the network). ``set_logger_provider`` makes the provider
+    global so ``LoggingHandler`` and tests can resolve it without imports of
+    the SDK internals.
+    """
+    provider = LoggerProvider(resource=resource)
+    exporter = log_exporter or OTLPLogExporter(
+        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", DEFAULT_OTLP_ENDPOINT),
+        insecure=True,
+    )
+    provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    set_logger_provider(provider)
+    return provider
+
+
+class _SkipOtelInternals(logging.Filter):
+    """Drop records emitted by the OpenTelemetry stack itself.
+
+    The OTLP exporters log their own transport failures through stdlib
+    logging; re-exporting those records would feed more failed exports
+    (feedback loop when the collector is unreachable). Application logs
+    are untouched — exporter transport noise is not an app signal.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.startswith("opentelemetry.")
+
+
 def configure_telemetry(
     service_name: str,
     *,
     span_exporter: Optional[SpanExporter] = None,
     metric_reader: Optional[MetricReader] = None,
+    log_exporter: Optional[LogExporter] = None,
 ) -> tuple:
     """Configure traces, metrics and logs for one service.
 
@@ -167,6 +215,7 @@ def configure_telemetry(
         service_name: Value used for ``service.name`` and the tracer/meter name.
         span_exporter: Optional exporter override (tests use in-memory).
         metric_reader: Optional metric reader override (tests use in-memory).
+        log_exporter: Optional log exporter override (tests use in-memory).
 
     Returns:
         ``(tracer, meter, logger)``. When ``OTEL_ENABLED`` is false the tracer
@@ -181,6 +230,14 @@ def configure_telemetry(
     resource = _build_resource(service_name)
     trace.set_tracer_provider(_build_tracer_provider(resource, span_exporter))
     metrics.set_meter_provider(_build_meter_provider(resource, metric_reader))
+
+    # Second log sink: OTLP export with the active span context (A5/A11).
+    # stdout keeps the structlog JSON line (platform driver / filelog path).
+    otlp_handler = LoggingHandler(
+        logger_provider=_build_logger_provider(resource, log_exporter)
+    )
+    otlp_handler.addFilter(_SkipOtelInternals())
+    logging.getLogger().addHandler(otlp_handler)
 
     return (
         trace.get_tracer(service_name),
