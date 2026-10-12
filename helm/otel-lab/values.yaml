@@ -1,5 +1,7 @@
 # helm/otel-lab/values.yaml
-# GKE Standard single-node profile (e2-small, 2 GiB) — PLAN §2.B-GCP.
+# GKE Standard single-node profile: Terraform usa e2-medium spot (GKE >=1.36
+# system overhead, requests 20m; ver COST.md). El Makefile legado conserva
+# e2-small como perfil original. PLAN §2.B-GCP.
 # Reglas duras: NUNCA tag `latest`; NUNCA valores de secretos aqui (Secret
 # Manager via CSI por nombre, §2.B-GCP); regiones/proyecto explicitos.
 
@@ -8,7 +10,8 @@ global:
   region: us-central1
   environment: lab
 
-# Spot node pool: los pods se programan contra el pool spot `e2-small` con su
+# Spot node pool: los pods se programan contra el pool spot (e2-medium via
+# Terraform; e2-small solo en el camino legado del Makefile) con su
 # taint estandar de GKE (tolerancia a desalojo: grace bajo + preStop, R-22).
 spot:
   nodeSelector:
@@ -64,7 +67,11 @@ collector:
   goMemLimit: 192MiB
   resources:
     requests:
-      cpu: 100m
+      # 20m: los system-pods de GKE >=1.36 consumen gran parte del CPU
+      # reservable del nodo; con 100m/pod la planificacion saturaba
+      # (Insufficient cpu, sesion 2026-10-11). El request bajo no limita el
+      # burst: los limits (cpu 1) siguen igual.
+      cpu: 20m
       memory: 128Mi
     limits:
       cpu: "1"
@@ -78,7 +85,10 @@ serviceA:
   servicePort: 8080
   resources:
     requests:
-      cpu: 100m
+      # 20m: ver nota en collector. Con GKE >=1.36 los system-pods consumen
+      # gran parte del CPU reservable del nodo; 100m/pod saturaba la
+      # planificacion (Insufficient cpu). El request bajo no limita el burst.
+      cpu: 20m
       memory: 160Mi
     limits:
       cpu: "1"
@@ -92,7 +102,7 @@ serviceB:
   servicePort: 8001
   resources:
     requests:
-      cpu: 100m
+      cpu: 20m # ver nota collector: GKE>=1.36 deja poco CPU reservable en el nodo
       memory: 160Mi
     limits:
       cpu: "1"
@@ -108,8 +118,10 @@ postgres:
   # init-scripts/ corre solo tras cada desalojo spot (lab efimero, §2.B-GCP).
   resources:
     requests:
-      cpu: 100m
+      # 20m: ver nota en collector (GKE >=1.36 y sus system-pods).
+      cpu: 20m
       memory: 128Mi
     limits:
       cpu: "1"
       memory: 256Mi
+

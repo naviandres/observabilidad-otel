@@ -18,20 +18,20 @@
 
 | # | Recurso | Cobertura créditos / free tier | Límite conocido | Estado en el proyecto | Verificación |
 |---|---|---|---|---|---|
-| 1 | VPC | $0: tráfico interno intra-región y egress intra-Google sin cargo; ingress gratis | Sin cargo por la red en sí ([vpc/pricing](https://cloud.google.com/vpc/pricing): "No charge" en tablas de data transfer interno e inbound) | **pendiente fase 2 (#21)** — existe solo la red `default` auto-creada | CLI: `gcloud compute networks list` → solo `default` |
-| 2 | Subnet | $0 (subnet normal; solo las *Hybrid Subnets* se cobran) | $0 por subnet estándar; Hybrid $0.315/h ([vpc/pricing](https://cloud.google.com/vpc/pricing)) | pendiente #21 | CLI: `gcloud compute networks subnets list` (tras #21) |
-| 3 | Firewall (sin ingress público) | $0: las reglas básicas de firewall VPC no aparecen tarifadas (Cloud NGFW es producto aparte) | Sin cargo listado para reglas básicas ([vpc/pricing](https://cloud.google.com/vpc/pricing), sección "Firewall rules" → remite a NGFW) | pendiente #21 | CLI: `gcloud compute firewall-rules list` (tras #21) |
-| 4 | Private Google Access | $0 según PLAN §3.1 L169; la página de pricing VPC no lista cargo para PGA | dato declarado: no tarifado explícitamente en la doc consultada (sin captura — enmienda 2026-10-11) | pendiente #21 (flag de subnet) | volcado CLI tras #21 (`gcloud compute networks subnets describe`) / plan TF de #21 |
-| 5 | GKE Standard (node pool spot e2-small) | Fee de gestión **$0.10/h/cluster** ([gke/pricing](https://cloud.google.com/kubernetes-engine/pricing)); free tier **$74.40/mes por billing account = 1 cluster zonal Standard gratis** (solo el fee, no los nodos) | 744 h/mes cubiertas por free tier; nodos spot e2-small **se pagan de créditos** | **pendiente #21** — 0 clusters | CLI: `gcloud container clusters list` → "Listed 0 items." |
-| 6 | Workload Identity | Sin cargo (función de GKE/IAM; no aparece tarifada en gke/pricing ni en free-cloud-features) | n/a | **pendiente #21** (WI del cluster); WIF de GitHub **aplazado a CI (B.8)** | n/a hoy; tras #21: `gcloud container clusters describe --show-workload-identity-config` |
+| 1 | VPC | $0: tráfico interno intra-región y egress intra-Google sin cargo; ingress gratis | Sin cargo por la red en sí ([vpc/pricing](https://cloud.google.com/vpc/pricing): "No charge" en tablas de data transfer interno e inbound) | **pendiente fase 2** — existe solo la red `default` auto-creada | CLI: `gcloud compute networks list` → solo `default` |
+| 2 | Subnet | $0 (subnet normal; solo las *Hybrid Subnets* se cobran) | $0 por subnet estándar; Hybrid $0.315/h ([vpc/pricing](https://cloud.google.com/vpc/pricing)) | pendiente fase 2 | CLI: `gcloud compute networks subnets list` (tras fase 2) |
+| 3 | Firewall (sin ingress público) | $0: las reglas básicas de firewall VPC no aparecen tarifadas (Cloud NGFW es producto aparte) | Sin cargo listado para reglas básicas ([vpc/pricing](https://cloud.google.com/vpc/pricing), sección "Firewall rules" → remite a NGFW) | pendiente fase 2 | CLI: `gcloud compute firewall-rules list` (tras fase 2) |
+| 4 | Private Google Access | $0 según PLAN §3.1 L169; la página de pricing VPC no lista cargo para PGA | dato declarado: no tarifado explícitamente en la doc consultada (sin captura — enmienda 2026-10-11) | pendiente fase 2 (flag de subnet) | volcado CLI tras fase 2 (`gcloud compute networks subnets describe`) / plan TF de fase 2 |
+| 5 | GKE Standard (node pool spot e2-small) | Fee de gestión **$0.10/h/cluster** ([gke/pricing](https://cloud.google.com/kubernetes-engine/pricing)); free tier **$74.40/mes por billing account = 1 cluster zonal Standard gratis** (solo el fee, no los nodos) | 744 h/mes cubiertas por free tier; nodos spot e2-small **se pagan de créditos** | **pendiente fase 2** — 0 clusters | CLI: `gcloud container clusters list` → "Listed 0 items." |
+| 6 | Workload Identity | Sin cargo (función de GKE/IAM; no aparece tarifada en gke/pricing ni en free-cloud-features) | n/a | **pendiente fase 2** (WI del cluster); WIF de GitHub **aplazado a CI (B.8)** | n/a hoy; tras fase 2: `gcloud container clusters describe --show-workload-identity-config` |
 | 7 | Artifact Registry | Free tier **0.5 GiB/mes**; luego **$0.10/GiB·mes** ($0.000136986/GiB·h) ([artifact-registry/pricing](https://cloud.google.com/artifact-registry/pricing), [free-cloud-features](https://cloud.google.com/free/docs/free-cloud-features)) | 0.5 GiB/mes por billing account; egress intra-región $0 | **creado** (repo `otel-lab`, 0.000 MB) | CLI: `gcloud artifacts repositories describe otel-lab --location=us-central1 --format=yaml` |
 | 8 | GCS (evidencia + state) | Free tier **5 GB·mes Standard en regiones US** (us-central1 aplica) + 5 000 ops Clase A + 50 000 Clase B ([free-cloud-features](https://cloud.google.com/free/docs/free-cloud-features)) | Excedente ≈$0.02/GB·mes (PLAN §3.1; confirmar en [storage/pricing](https://cloud.google.com/storage/pricing)) | **creados 2 buckets**; evidence con lifecycle 7 d; **tfstate SIN lifecycle (desviación, §3.3)** | CLI: `gcloud storage buckets describe … --raw` (×2) |
-| 9 | Secret Manager (2 secretos previstos) | Free tier **6 versiones activas/mes + 10 000 accesos/mes**; luego **$0.06/versión·mes** y **$0.03/10 000 accesos** ([secret-manager/pricing](https://cloud.google.com/secret-manager/pricing)) | 2 secretos × 1 versión ≪ free tier → coste ≈ $0 | **1 de 2 creado** (`pg-password`); token Grafana **aplazado** con decisión local-only (current.md 2026-10-11) | CLI: `gcloud secrets list` |
-| 10 | Cloud Trace | Free allotment **2,5 M spans/mes por billing account**; luego **$0.20/M spans** ([observability/pricing](https://cloud.google.com/products/observability/pricing)) | Cuotas del proyecto por CLI: ingestión **3 000 000 spans/día**, writes 4 800/min, reads 300/min (§2) | API habilitada; ingestión real **pendiente fase 2-3** (#22/#24). Diseño C2: export a Cloud Trace **apagado en benchmark** | CLI: `gcloud quotas info list --service=cloudtrace.googleapis.com …` (§2) |
-| 11 | Cloud Monitoring (+ Managed Prometheus) | Free: **todas las métricas de Google Cloud no tarifadas**; **150 MiB/mes** de métricas tarifadas por billing account; **1 M time series de lectura/mes** por billing account; uptime checks 1 M ejecuciones/proyecto. **Managed Prometheus: sin allotment gratis, $0.06/M samples** ([observability/pricing](https://cloud.google.com/products/observability/pricing)) | Cuotas CLI: ingestión 30 000 req/min, queries 6 000/min, custom descriptors 10 000, dashboards 1 000 (§2) | API habilitada; dashboards **pendiente fase 4-5 (#25)** | CLI: `gcloud quotas info list --service=monitoring.googleapis.com …` (§2) |
+| 9 | Secret Manager (2 secretos previstos) | Free tier **6 versiones activas/mes + 10 000 accesos/mes**; luego **$0.06/versión·mes** y **$0.03/10 000 accesos** ([secret-manager/pricing](https://cloud.google.com/secret-manager/pricing)) | 2 secretos × 1 versión ≪ free tier → coste ≈ $0 | **1 de 2 creado** (`pg-password`); token Grafana **aplazado** con decisión local-only (2026-10-11) | CLI: `gcloud secrets list` |
+| 10 | Cloud Trace | Free allotment **2,5 M spans/mes por billing account**; luego **$0.20/M spans** ([observability/pricing](https://cloud.google.com/products/observability/pricing)) | Cuotas del proyecto por CLI: ingestión **3 000 000 spans/día**, writes 4 800/min, reads 300/min (§2) | API habilitada; ingestión real **pendiente fase 2-3**. Diseño C2: export a Cloud Trace **apagado en benchmark** | CLI: `gcloud quotas info list --service=cloudtrace.googleapis.com …` (§2) |
+| 11 | Cloud Monitoring (+ Managed Prometheus) | Free: **todas las métricas de Google Cloud no tarifadas**; **150 MiB/mes** de métricas tarifadas por billing account; **1 M time series de lectura/mes** por billing account; uptime checks 1 M ejecuciones/proyecto. **Managed Prometheus: sin allotment gratis, $0.06/M samples** ([observability/pricing](https://cloud.google.com/products/observability/pricing)) | Cuotas CLI: ingestión 30 000 req/min, queries 6 000/min, custom descriptors 10 000, dashboards 1 000 (§2) | API habilitada; dashboards **pendiente fase 4-5** | CLI: `gcloud quotas info list --service=monitoring.googleapis.com …` (§2) |
 | 12 | Cloud Logging (dentro de cuota) | Free: **primeros 50 GiB/proyecto/mes**; luego **$0.50/GiB**; retención >30 d **$0.01/GiB·mes**; logs en bucket `_Required` sin cargo ([observability/pricing](https://cloud.google.com/products/observability/pricing), [free-cloud-features](https://cloud.google.com/free/docs/free-cloud-features)) | Cuota de tasa CLI: write_bytes **4,8 GB/min en us-central1** (rate, no free tier); reads 60/min; sinks 200; buckets 100 (§2). Retención por diseño C3: 3 d | API habilitada; ingestión **pendiente fase 2-3**. Volumen estimado del ciclo ABBA ≈450 MB ≪ 50 GiB (PLAN §3.4 C3) | CLI: `gcloud quotas info list --service=logging.googleapis.com …` (§2) |
 | 13 | IAM / Service Accounts | Sin cargo (IAM no tiene pricing; no aparece en free tier) | n/a | **creada** SA `otel-lab-deploy@…` con **6 roles** least-privilege (get-iam-policy) | CLI: `gcloud iam service-accounts list` + `gcloud projects get-iam-policy` (§3.4) |
-| 14 | GCP Budgets + Quota Alerts | Budgets: medición + alerta, **sin cargo** (el budget no cobra; current.md 2026-10-11). Quota alerts: alert policies sobre métricas Billing/Quota/Uptime **no tarifadas** (el cobro de alertas empieza 2027-09-01, [observability/pricing](https://cloud.google.com/products/observability/pricing)) | umbrales por budget: 50/80/90/100/150 % | **budget creado y corregido** (§3.6); **quota alerts aún NO activadas** (B.2 paso 2, pendiente consola) | CLI: `gcloud billing budgets describe …` (§3.6) |
+| 14 | GCP Budgets + Quota Alerts | Budgets: medición + alerta, **sin cargo** (el budget no cobra; 2026-10-11). Quota alerts: alert policies sobre métricas Billing/Quota/Uptime **no tarifadas** (el cobro de alertas empieza 2027-09-01, [observability/pricing](https://cloud.google.com/products/observability/pricing)) | umbrales por budget: 50/80/90/100/150 % | **budget creado y corregido** (§3.6); **quota alerts aún NO activadas** (B.2 paso 2, pendiente consola) | CLI: `gcloud billing budgets describe …` (§3.6) |
 
 **Conclusión de cobertura:** ningún recurso de la lista blanca queda fuera de créditos/free tier
 en el volumen del lab. Los únicos consumos reales esperados de los $300 son: **nodos spot e2-small**
@@ -129,7 +129,7 @@ completa es reproducible con `gcloud services list --enabled --format 'value(con
 
 > **Desviación anotada (tfstate sin lifecycle):** el runbook B.6 aplicaba Delete a 7 d también al
 > bucket de state; borrar el state de Terraform a los 7 días dejaría el backend huérfano. Decisión
-> registrada en `progress/current.md` (2026-10-11): el tfstate **no** recibe lifecycle y se destruye
+> registrada el 2026-10-11: el tfstate **no** recibe lifecycle y se destruye
 > manualmente en el teardown final. El `softDeletePolicy` de 7 d es el default de GCS (recuperación
 > accidental) y **no** sustituye a la regla lifecycle.
 
@@ -140,13 +140,13 @@ completa es reproducible con `gcloud services list --enabled --format 'value(con
 
 `gcloud projects get-iam-policy otel-lab-obs-2610` filtrada a la SA → **6 bindings**:
 `roles/artifactregistry.writer`, `roles/cloudtrace.agent`, `roles/container.developer`,
-`roles/logging.logWriter`, `roles/monitoring.metricWriter`, `roles/secretmanager.secretAccessor`. ✓ least privilege B.4 (sin `container.admin`, sin `storage.objectAdmin` aún — se restringirá a buckets en #21).
+`roles/logging.logWriter`, `roles/monitoring.metricWriter`, `roles/secretmanager.secretAccessor`. ✓ least privilege B.4 (sin `container.admin`, sin `storage.objectAdmin` aún — se restringirá a buckets en la fase 2).
 
 ### 3.5 Secret Manager
 
 `gcloud secrets list` → **1 secreto: `pg-password`** (creado 2026-10-11T01:16:23, replicación
 `automatic`; el valor vive solo en SM, nunca en repo/chat). El 2º secreto previsto (token Grafana)
-queda **aplazado** por la decisión hub-local (current.md 2026-10-11, sección C cerrada local-only).
+queda **aplazado** por la decisión hub-local (2026-10-11, sección C cerrada local-only).
 
 ### 3.6 Budget
 
@@ -161,14 +161,14 @@ notificationsRule: {}        # -> emails por defecto a los admins del billing ac
 ```
 
 - `EXCLUDE_ALL_CREDITS` = el budget mide **gasto bruto** (el consumo de créditos dispara las alertas;
-  con `INCLUDE_ALL_CREDITS` nunca habrían sonado). Corrección ejecutada 2026-10-11 vía API (current.md).
+  con `INCLUDE_ALL_CREDITS` nunca habrían sonado). Corrección ejecutada 2026-10-11 vía API.
 - **Pendiente:** quota alerts al 80 % en Trace/Logging/Monitoring (B.2 paso 2) — no creadas aún;
   ruta en §4.
 
 ### 3.7 Cómputo y red (gate "sin computo creado" de la sección D del runbook)
 
-- `gcloud container clusters list` → **0 clusters** ✓ (el cómputo GCP se crea en #21).
-- `gcloud compute networks list` → solo `default` (auto-creada); la VPC del diseño, pendiente #21.
+- `gcloud container clusters list` → **0 clusters** ✓ (el cómputo GCP se crea en la fase 2).
+- `gcloud compute networks list` → solo `default` (auto-creada); la VPC del diseño, pendiente fase 2.
 - `gcloud billing projects describe otel-lab-obs-2610` → `billingEnabled: true`, billing account
   `013D56-6929B9-3AC57A` vinculado ✓.
 
@@ -213,4 +213,3 @@ Sustituye a las antiguas "capturas pendientes del humano" (`credits-gcp.png`, `b
   [artifact-registry/pricing](https://cloud.google.com/artifact-registry/pricing),
   [secret-manager/pricing](https://cloud.google.com/secret-manager/pricing),
   [vpc/pricing](https://cloud.google.com/vpc/pricing).
-- Informe de implementación: `progress/impl_evidence_b1_gcp.md` (harness).

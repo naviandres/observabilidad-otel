@@ -28,6 +28,12 @@ dist/
 htmlcov/
 .mypy_cache/
 
+# === Terraform ===
+.terraform/
+*.tfplan
+tfplan.bin
+tfplan.json
+
 # IaC/evidencia hygiene (runbook D "NO OLVIDAR", 2026-10-11)
 *.pem
 credentials
