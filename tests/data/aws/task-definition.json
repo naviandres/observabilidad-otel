@@ -111,25 +111,25 @@
       "environment": [
         {
           "name": "POSTGRES_USER",
-          "value": "otel-lab"
+          "value": "postgres"
         },
         {
           "name": "POSTGRES_DB",
-          "value": "otel"
+          "value": "orders"
         }
       ],
       "essential": true,
       "healthCheck": {
         "command": [
           "CMD-SHELL",
-          "pg_isready -U otel-lab -d otel || exit 1"
+          "pg_isready -U postgres -d orders || exit 1"
         ],
         "interval": 10,
         "retries": 5,
         "startPeriod": 10,
         "timeout": 5
       },
-      "image": "public.ecr.aws/docker/library/postgres:16-alpine",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/postgres:0.1.0",
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {

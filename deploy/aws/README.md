@@ -4,13 +4,15 @@ Versioned, offline artifacts to run the whole pipeline as **one ECS Fargate
 task** (`awsvpc`): `service-a` → `service-b` → `postgres`, the OTel collector
 (ADOT binary) and the `cloudwatch-agent` sidecar. Nothing here creates cloud
 resources by itself; the cloud session is driven by the root `Makefile`
-targets `aws-*` + `scripts/tunnel.ps1`.
+targets `aws-*` + `scripts/access.ps1` (temporary SG /32 grant/revoke — SSM
+port-forwarding to Fargate does not exist, see `docs/aws-ecs.md` §5).
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `task-definition.json` | Task-definition template (5 containers, FARGATE/awsvpc, cpu 1024 / memory 2048). Tokens are rendered at deploy time — never edit the rendered copy. |
+| `postgres.Dockerfile` | Internal `otel-lab/postgres` image: `postgres:16-alpine` + `init-scripts/` baked into `/docker-entrypoint-initdb.d/` (Fargate has no host bind-mounts). Built by `make aws-push`. |
 | `iam/execution-role-policy.json` | Policy for the **execution role** (ECR pull, CloudWatch Logs write, SSM parameter read for `secrets`). |
 | `iam/task-role-policy.json` | Policy for the **task role** (X-Ray write+sampling, CloudWatch Logs/metrics write, SSM/EC2 read for `resourcedetection/ecs`). |
 
@@ -36,15 +38,24 @@ it is stored as SSM SecureString parameters and only referenced by ARN.
 
 ## SSM parameters (SecureString) referenced by ARN
 
-| Parameter | Consumer |
-|---|---|
-| `/otel-lab/postgres/password` | `postgres` container (`POSTGRES_PASSWORD`) |
-| `/otel-lab/database-url/service-a` | `service-a` (`DATABASE_URL`, db `orders`) |
-| `/otel-lab/database-url/service-b` | `service-b` (`DATABASE_URL`, db `inventory`) |
-| `/otel-lab/grafana/prom-url` · `/prom-auth` | collector `prometheusremotewrite` |
-| `/otel-lab/grafana/tempo-endpoint` · `/tempo-auth` | collector `otlphttp/tempo` |
-| `/otel-lab/grafana/loki-endpoint` · `/loki-auth` | collector `otlphttp/loki` |
-| `/otel-lab/cloudwatch-agent/config` | `cloudwatch-agent` (`CW_CONFIG_CONTENT`) |
+| Parameter | Consumer | Value shape |
+|---|---|---|
+| `/otel-lab/postgres/password` | `postgres` container (`POSTGRES_PASSWORD`) | raw password of role `postgres` |
+| `/otel-lab/database-url/service-a` | `service-a` (`DATABASE_URL`, db `orders`) | `postgresql://postgres:<pw>@localhost:5432/orders` |
+| `/otel-lab/database-url/service-b` | `service-b` (`DATABASE_URL`, db `inventory`) | `postgresql://postgres:<pw>@localhost:5432/inventory` |
+| `/otel-lab/grafana/prom-url` · `/prom-auth` | collector `prometheusremotewrite` | URL + basic-auth token |
+| `/otel-lab/grafana/tempo-endpoint` · `/tempo-auth` | collector `otlphttp/tempo` | URL + basic-auth token |
+| `/otel-lab/grafana/loki-endpoint` · `/loki-auth` | collector `otlphttp/loki` | URL + basic-auth token |
+| `/otel-lab/cloudwatch-agent/config` | `cloudwatch-agent` (`CW_CONFIG_CONTENT`) | agent JSON |
+
+The role/DB pair **must** match the image seed: the `postgres` container runs
+`POSTGRES_USER=postgres` / `POSTGRES_DB=orders` with `init-scripts/` baked into
+the internal image `otel-lab/postgres` (Fargate cannot bind-mount host
+folders). `01-init.sh` additionally creates the `inventory` DB for `service-b`
+— the live run of 2026-10-12 failed exactly here when the template pointed at a
+non-existent `otel-lab` role (`FATAL: role "postgres" does not exist` → 500 →
+503). Both URLs use `localhost` because `awsvpc` shares one network namespace
+per task.
 
 The `otel-collector` container also receives `AWS_REGION` as a plain
 `environment` value and the six Grafana parameters above as `secrets`, because
