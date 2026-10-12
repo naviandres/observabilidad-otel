@@ -62,7 +62,7 @@
       { "Name": "cloud.provider", "Value": "aws" },
       { "Name": "deployment.environment", "Value": "lab" }
     ],
-    "Stat": "Sum",
+    "Statistic": "Sum",
     "Period": 300,
     "EvaluationPeriods": 1,
     "Threshold": 5,

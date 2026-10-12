@@ -1,6 +1,4 @@
 {
-  "dashboardName": "otel-lab-slo",
-  "comment": "Panel nativo AWS complementario del SLO de Grafana (PLAN 3.C). Maximo 3 widgets (decision de coste: GetMetricData se cobra siempre y solo hay 10 metricas custom gratis, por lo que el dashboard completo de 6 paneles vive en Prometheus). Fuentes REALES verificadas en la sesion AWS: los unicos contadores publicados en CloudWatch son los 4 de la lista blanca EMF del collector (namespace OtelLab, dimensiones service.name/cloud.provider/deployment.environment). DESVIACION: el PLAN pedia CPUUtilization del task; el contenedor cloudwatch-agent del task definition muri6 en vivo (exit 1, docs/evidence/02-aws-ecs-session.md) y no hay ContainerInsights (de pago, fuera de lista blanca), asi que NO existe ninguna metrica de CPU en CloudWatch; el tercer widget muestra la salud de las dependencias (db_query_errors_total + payment_authorization_failures_total), el senal de degradacion que si se publica. La CPU vive en el panel 5 de Grafana (hostmetrics via Prometheus).",
   "widgets": [
     {
       "type": "metric",
@@ -70,8 +68,7 @@
             {
               "expression": "(m2/m1)*100",
               "id": "e1",
-              "label": "error ratio %",
-              "period": "300"
+              "label": "error ratio %"
             }
           ]
         ]
@@ -85,7 +82,7 @@
       "height": 6,
       "properties":
      {
-        "title": "Dependencia y pagos (sustituto de CPUUtilization: el cw-agent muri6 exit 1 y no hay ContainerInsights; ver comment)",
+        "title": "Dependencia y pagos (sustituto de CPUUtilization: cw-agent exit 1 y sin ContainerInsights; ver docs/evidence/05-dashboards-local.md)",
         "stat": "Sum",
         "period": 300,
         "region": "us-east-1",

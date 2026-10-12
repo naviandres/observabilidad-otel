@@ -190,15 +190,50 @@ def test_local_collector_wires_hostmetrics_into_metrics_pipeline():
 
 def test_cloudwatch_dashboard_has_at_most_three_widgets():
     dash = _load(CW)
-    assert dash["dashboardName"] == "otel-lab-slo"
+    # put-dashboard solo admite el body {"widgets": [...]}: cualquier clave
+    # extra (dashboardName, comment) genera una ValidationMessage de rechazo/
+    # aviso. El nombre viaja UNIQUEMENTE en el flag --dashboard-name (Makefile).
+    assert set(dash.keys()) == {"widgets"}
     assert 1 <= len(dash["widgets"]) <= 3
+
+
+def test_cloudwatch_dashboard_body_no_comment():
+    """Regresion mini-sesion AWS: put-dashboard avisa 'The "comment" property
+    is not expected'. La documentacion del panel vive en
+    docs/evidence/05-dashboards-local.md, no dentro del body."""
+    dash = _load(CW)
+    assert "comment" not in dash
+    for widget in dash["widgets"]:
+        assert "comment" not in widget
+        assert "comment" not in widget["properties"]
+
+
+def test_cloudwatch_dashboard_expression_periods_valid():
+    """Regresion mini-sesion AWS: en el body de put-dashboard la EXPRESION
+    metric-math solo admite period en {1,5,10,30} (300 => rechazo). El JSON
+    opted por omitir el period de la expresion para que herede el del widget;
+    se fija aqui: ausente o valido."""
+    allowed = {1, 5, 10, 30}
+    dash = _load(CW)
+    found = False
+    for widget in dash["widgets"]:
+        for row in widget["properties"]["metrics"]:
+            for item in row:
+                if isinstance(item, dict) and "expression" in item:
+                    found = True
+                    period = item.get("period")
+                    assert period is None or int(period) in allowed, (
+                        f"period {period!r} invalido en la expresion {item['id']} "
+                        f"(permitidos: {sorted(allowed)} u omitir)"
+                    )
+    assert found, "el dashboard perdio su expresion metric-math (widget 2)"
 
 
 def test_cloudwatch_dashboard_only_reads_emf_whitelist():
     """Ningun widget inventa metricas: las unicas que existen en CloudWatch son
     los 4 contadores de la lista blanca EMF del namespace OtelLab. No hay
     CPUUtilization (cw-agent murio exit 1 y ContainerInsights es de pago) — la
-    eleccion del sustituto esta documentada en el comment del JSON."""
+    eleccion del sustituto esta documentada en docs/evidence/05-dashboards-local.md."""
     dash = _load(CW)
     names = set()
     for widget in dash["widgets"]:
