@@ -272,6 +272,18 @@ def test_access_helper_replaces_broken_tunnel():
     assert "DESVIACION" in text.upper(), "access.ps1 debe imprimir la desviacion del PLAN"
     assert "AWS-StartPortForwardingSessionForRemoteSession" not in text
     assert "AWS-StartPortForwardingSessionForECS" not in text
+    # Ronda 3 (review D1): revoke por SecurityGroupRuleId (forma estable),
+    # NO filtrando Description a nivel de IpPermissions (vive en IpRanges[])
+    assert "--security-group-rule-ids" in text
+    assert "describe-security-group-rules" in text
+    assert "SecurityGroups[0].IpPermissions[?Description" not in text
+    # Ronda 3 (review D1): verificacion post-revoke alcanzable (esperado 0)
+    assert "length(SecurityGroups[0].IpPermissions)" in text
+    # Ronda 3 (review D2/D3): IP publica via Association.PublicIp y la clave
+    # real del KeyValuePair de ECS es .Value (mayuscula), nunca .value
+    assert "Association.PublicIp" in text
+    assert "].Value" in text
+    assert "].value" not in text
     # docs reflejan el flujo grant/verify/revoke, no el tunel roto
     docs_text = DOCS.read_text(encoding="utf-8")
     assert "aws-access-grant" in docs_text and "aws-access-revoke" in docs_text

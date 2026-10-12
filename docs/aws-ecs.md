@@ -193,13 +193,22 @@ Sustituto real — `scripts/access.ps1` (targets `aws-access-grant` /
    añade al SG `otel-lab-task` una regla ingress TCP **/32** (solo esa IP) para
    los puertos pedidos (default `8000,8889`), marcada con la description
    `otel-lab-temp-session`. Imprime la IP pública del ENI de la task leída de
-   `ec2 describe-network-interfaces → Association.PublicIp`.
+   `ec2 describe-network-interfaces → Association.PublicIp` (el ENI se resuelve
+   desde los details de la task con la clave real `.Value`, mayúscula) y
+   persiste los `SecurityGroupRuleId` creados en un archivo de sesión
+   (`$env:TEMP\otel-lab-sg-rules-<sg>.txt`) para que Revoke los use.
 2. **Verificación**: `make aws-verify` corre el framework `--include-aws`
    contra `http://<IP_TASK>:8000` con `--prometheus-url http://<IP_TASK>:8889/metrics`.
-3. **Revoke**: elimina toda regla /32 marcada como temporal; el SG vuelve a **0
-   reglas de ingress** — el steady-state del diseño R-10/§3.2 sigue intacto. La
-   regla vive **solo durante la sesión**; olvidar el revoke deja exposición
-   puntual del /32 del operador, no de 0.0.0.0/0.
+3. **Revoke**: revoca **por `--security-group-rule-ids`** (los ids persistidos
+   por Grant + discovery en vivo con `ec2 describe-security-group-rules`,
+   prefiltrando `egress=false` + `description=otel-lab-temp-session`); después
+   **verifica** con `describe-security-groups` que el SG muestra `IpPermissions`
+   **[]** (0 ingress; si no, sale con error). Nota (bug corregido en ronda 3):
+   la description NO vive a nivel de `IpPermissions` sino dentro de `IpRanges[]`,
+   así que filtrar `IpPermissions[?Description==…]` nunca coincidía y la /32
+   sobrevivia a la sesión. El steady-state R-10/§3.2 queda garantizado por la
+   verificación post-revoke. La regla vive **solo durante la sesión**; olvidar
+   el revoke deja exposición puntual del /32 del operador, no de 0.0.0.0/0.
 
 El shell por ECS Exec (`aws ecs execute-command ... --command "..."`, plugin
 `session-manager-plugin` en el PATH) sigue disponible para depuración dentro de

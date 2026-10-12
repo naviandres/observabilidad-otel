@@ -26,8 +26,11 @@
     (`ec2 describe-network-interfaces` -> Association.PublicIp), verificado
     en vivo 2026-10-12.
 .PARAMETER Action
-    Grant: anade la regla /32. Revoke: revoca toda regla /32 marcada como
-    temporal (description otel-lab-temp-session).
+    Grant: anade la regla /32 y persiste los SecurityGroupRuleId creados
+    (archivo de sesion en $env:TEMP). Revoke: revoca por
+    --security-group-rule-ids (archivo de sesion + discovery en vivo via
+    describe-security-group-rules) y VERIFICA despues que el SG muestra
+    IpPermissions [] (0 ingress).
 .PARAMETER Region
     Region AWS (default: us-east-1).
 .PARAMETER Profile
@@ -135,7 +138,7 @@ function Get-TaskPublicIp {
     if (-not $taskArn -or $taskArn -eq "None") { return $null }
     $eni = Invoke-Aws @(
         "ecs", "describe-tasks", "--cluster", $Cluster, "--tasks", $taskArn,
-        "--query", "tasks[0].attachments[0].details[?Name=='networkInterfaceId'].value | [0]",
+        "--query", "tasks[0].attachments[0].details[?Name=='networkInterfaceId'].Value | [0]",
         "--output", "text"
     )
     if (-not $eni -or $eni -eq "None") { return $null }
@@ -145,6 +148,36 @@ function Get-TaskPublicIp {
     )
     if (-not $ip -or $ip -eq "None") { return $null }
     return $ip
+}
+
+function Get-RuleSessionFile {
+    param([string]$SgId)
+    Join-Path $env:TEMP ("otel-lab-sg-rules-" + $SgId + ".txt")
+}
+
+function Get-TempRuleIds {
+    # describe-security-group-rules es la forma ESTABLE: cada regla expone
+    # SecurityGroupRuleId, Description y CidrIpv4 a nivel de la regla. La
+    # descripcion NO vive a nivel de IpPermissions en describe-security-groups
+    # (vive dentro de IpRanges[]), por eso el viejo filtro
+    # IpPermissions[?Description==...] nunca coincidia (bug D1, review ronda 2).
+    param([string]$SgId, [string]$Cidr = "")
+    $query = if ($Cidr) {
+        "SecurityGroupRules[?CidrIpv4=='$Cidr'].SecurityGroupRuleId"
+    } else {
+        "SecurityGroupRules[?ends_with(CidrIpv4, '/32')].SecurityGroupRuleId"
+    }
+    for ($i = 0; $i -lt 5; $i++) {
+        $out = Invoke-Aws @(
+            "ec2", "describe-security-group-rules", "--group-ids", $SgId,
+            "--filters", "Name=egress,Values=false", "Name=description,Values=$Marker",
+            "--query", $query, "--output", "text"
+        )
+        $ids = @($out -split '\s+' | Where-Object { $_ -match '^sgr-[0-9a-f]+$' })
+        if ($ids.Count -gt 0) { return $ids }
+        Start-Sleep -Seconds 2
+    }
+    return @()
 }
 
 $sgId = Get-SecurityGroupId
@@ -167,6 +200,15 @@ if ($Action -eq "Grant") {
     Invoke-Aws @("ec2", "authorize-security-group-ingress", "--group-id", $sgId, "--ip-permissions", $fileArg) | Out-Null
     Remove-Item ($fileArg -replace '^file:///', '') -ErrorAction SilentlyContinue
     Write-Host "[access] regla TEMPORAL aplicada (description=$Marker)." -ForegroundColor Green
+    # Persistir los SecurityGroupRuleId creados: Revoke los usa como contrato
+    # estable (la description no es filtrable a nivel de IpPermissions).
+    $grantIds = Get-TempRuleIds -SgId $sgId -Cidr "$ip/32"
+    if ($grantIds.Count -gt 0) {
+        Set-Content -Path (Get-RuleSessionFile -SgId $sgId) -Value $grantIds -Encoding ascii
+        Write-Host "[access] rule-ids persistidos para Revoke: $($grantIds -join ' ')" -ForegroundColor Cyan
+    } else {
+        Write-Host "[access] AVISO: no se descubrieron rule-ids; Revoke usara discovery en vivo." -ForegroundColor Yellow
+    }
     try {
         $taskIp = Get-TaskPublicIp
         if ($taskIp) {
@@ -184,37 +226,35 @@ if ($Action -eq "Grant") {
 
 # --- Revoke ---------------------------------------------------------------
 Write-Host "[access] revocando reglas /32 temporales (description=$Marker) del SG $sgId..." -ForegroundColor Cyan
-$rulesJson = Invoke-Aws @(
-    "ec2", "describe-security-groups", "--group-ids", $sgId,
-    "--query", "SecurityGroups[0].IpPermissions[?Description=='$Marker']", "--output", "json"
-)
-$perms = @($rulesJson | ConvertFrom-Json)
-if ($perms.Count -eq 0 -or -not $perms[0]) {
-    Write-Host "[access] no queda ninguna regla temporal que revocar (steady-state: SG sin ingress)." -ForegroundColor Green
-    exit 0
+# Revocar por SecurityGroupRuleId (forma estable del CLI): los ids persistidos
+# por GRANT en el archivo de sesion + discovery en vivo por
+# describe-security-group-rules. NO se filtra IpPermissions[?Description==...]:
+# la description vive dentro de IpRanges[] y ese filtro nunca coincidia
+# (bug D1, review ronda 2: la regla /32 sobrevivia a la sesion -> R-10 roto).
+$sessionFile = Get-RuleSessionFile -SgId $sgId
+$ruleIds = @()
+if (Test-Path $sessionFile) {
+    $ruleIds += @(Get-Content $sessionFile | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -match '^sgr-[0-9a-f]+$' })
 }
-$revoke = @(
-    foreach ($p in $perms) {
-        @{
-            IpProtocol = $p.IpProtocol
-            FromPort   = $p.FromPort
-            ToPort     = $p.ToPort
-            IpRanges   = @($p.IpRanges | Where-Object { $_.CidrIp -match '/32$' -and $_.Description -eq $Marker } |
-                ForEach-Object { @{ CidrIp = $_.CidrIp; Description = $_.Description } })
-        }
-    }
-)
-$revoke = @($revoke | Where-Object { $_.IpRanges.Count -gt 0 })
-if ($revoke.Count -eq 0) {
-    Write-Host "[access] las reglas marcadas no tienen rangos /32; nada que revocar." -ForegroundColor Green
-    exit 0
+$ruleIds += @(Get-TempRuleIds -SgId $sgId)
+$ruleIds = @($ruleIds | Select-Object -Unique)
+if ($ruleIds.Count -gt 0) {
+    $revokeArgs = @("ec2", "revoke-security-group-ingress", "--security-group-rule-ids") + $ruleIds
+    Invoke-Aws $revokeArgs | Out-Null
+    Write-Host "[access] revocado por rule-id: $($ruleIds -join ' ')" -ForegroundColor Green
+} else {
+    Write-Host "[access] no queda ninguna regla temporal propia que revocar." -ForegroundColor Green
 }
-$fileArg = Write-JsonArgFile -Json (ConvertTo-JsonArray $revoke)
-Invoke-Aws @("ec2", "revoke-security-group-ingress", "--group-id", $sgId, "--ip-permissions", $fileArg) | Out-Null
-Remove-Item ($fileArg -replace '^file:///', '') -ErrorAction SilentlyContinue
+Remove-Item $sessionFile -ErrorAction SilentlyContinue
+# Verificacion post-revoke: describe-security-groups debe mostrar IpPermissions []
 $left = Invoke-Aws @(
     "ec2", "describe-security-groups", "--group-ids", $sgId,
     "--query", 'length(SecurityGroups[0].IpPermissions)', "--output", "text"
 )
-Write-Host "[access] revocado. Ingress restantes en el SG: $left (esperado 0)" -ForegroundColor Green
+if ($left -ne "0") {
+    Write-Host "[access] ERROR: quedan $left regla(s) de ingress en $sgId (esperado 0)." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[access] revocado y VERIFICADO: IpPermissions = [] (0 ingress, R-10 intacto)." -ForegroundColor Green
 exit 0

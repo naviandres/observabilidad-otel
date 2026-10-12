@@ -294,7 +294,7 @@ aws-access-revoke:
 aws-verify:
 	@task=$$($(AWS) ecs list-tasks --cluster $(ECS_CLUSTER) --service-name $(ECS_SERVICE) --desired-status RUNNING --query 'taskArns[0]' --output text); \
 	 if [ "$$task" = "None" ] || [ -z "$$task" ]; then echo "ERROR: no hay task RUNNING (make aws-start)"; exit 1; fi; \
-	 eni=$$($(AWS) ecs describe-tasks --cluster $(ECS_CLUSTER) --tasks $$task --query 'tasks[0].attachments[0].details[?Name==`networkInterfaceId`].value | [0]' --output text); \
+	 eni=$$($(AWS) ecs describe-tasks --cluster $(ECS_CLUSTER) --tasks $$task --query 'tasks[0].attachments[0].details[?Name==`networkInterfaceId`].Value | [0]' --output text); \
 	 ip=$$($(AWS) ec2 describe-network-interfaces --network-interface-ids $$eni --query 'NetworkInterfaces[0].Association.PublicIp' --output text); \
 	 if [ "$$ip" = "None" ] || [ -z "$$ip" ]; then echo "ERROR: la task no tiene IP publica en el ENI $$eni"; exit 1; fi; \
 	 echo ">> task publica: $$ip (endpoint :8000, scrape :8889)"; \
