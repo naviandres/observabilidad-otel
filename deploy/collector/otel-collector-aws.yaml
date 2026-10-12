@@ -125,9 +125,33 @@ exporters:
   awsxray:
     region: ${env:AWS_REGION}
   # 2/7 CloudWatch EMF (metrics): only the 4 whitelisted counters, namespace OtelLab.
+  # log_group_name EXPLICITO: sin el, el exporter escribe en el default
+  # `/metrics/{Namespace}` (= /metrics/OtelLab) y la task role solo permite
+  # logs:* sobre /otel/labs/* → PutLogEvents 400 AccessDenied en vivo
+  # (sesion 2026-10-12, bug 2). /otel/labs/emf queda dentro de la politica
+  # (CreateLogGroup/CreateLogStream/PutLogEvents) y el exporter lo crea solo.
+  # resource_to_telemetry_conversion + metric_declarations: A7 pide que la
+  # metrica exponga service.name / cloud.provider / deployment.environment.
+  # Los resource attributes se vuelven labels y SOLO los tres declarados se
+  # publican como dimensiones → 4 metricas x 1 set de dimensiones = 4 series
+  # (<10, A9 intacto). Las demas labels quedan como campos del log EMF, no
+  # como dimensiones.
   awsemf:
     region: ${env:AWS_REGION}
     namespace: OtelLab
+    log_group_name: "/otel/labs/emf"
+    # NoDimensionRollup: con el rollup default (ZeroAndSingleDimensionRollup)
+    # cada resource attribute convertido en label genera su propia serie ->
+    # 26 variantes de orders_created_total en vivo (2026-10-12), rompiendo el
+    # guarda de cardinalidad (CloudWatch cobra por nombre+set de dimensiones).
+    # Con NoDimensionRollup SOLO se publica el set declarado abajo.
+    dimension_rollup_option: NoDimensionRollup
+    resource_to_telemetry_conversion:
+      enabled: true
+    metric_declarations:
+      - dimensions: [[service.name, cloud.provider, deployment.environment]]
+        metric_name_selectors:
+          - ".*"
   # 3/7 CloudWatch Logs. Per-service log group via the {ServiceName} macro.
   awscloudwatchlogs:
     region: ${env:AWS_REGION}
