@@ -24,7 +24,7 @@
 | 2 | ECS Fargate (0.5 vCPU / 1 GB) | Sin free tier: se paga de créditos | ≈$0.025/h el perfil mínimo | 0 clusters (cómputo en Fase 2) | CLI: `aws ecs list-clusters` → `[]` (sección 2) |
 | 3 | ECR | 500 GB/mes | $0.10/GB·mes excedido | **2 repos creados** (service-a, service-b), tag IMMUTABLE, lifecycle "expire untagged 7 d" | CLI: `aws ecr describe-repositories` + `get-lifecycle-policy` (sección 6) |
 | 4 | S3 ≤5 GB | 5 GB/mes + 20.000 GET + 2.000 PUT | estándar | **1 bucket de evidencia** con lifecycle abort-multipart 7 d y bloqueo de acceso público total | CLI: `create-bucket` + `get-public-access-block` (sección 6) |
-| 5 | SSM Session Manager | Sin cargo por sesión (híbridos $0.05 desde 2026-09-30) | — | sin sesión activa (no hay cómputo); plugin local pendiente (sección 5) | CLI: `aws ssm start-session --help` |
+| 5 | SSM Session Manager | Sin cargo por sesión (híbridos $0.05 desde 2026-09-30) | — | sin sesión activa (no hay cómputo); plugin local **instalado** (sección 5) | CLI: `session-manager-plugin --version` → `1.2.835.0` |
 | 6 | SSM Parameter Store (Standard) | 10.000 parámetros | $0.05/50 excedidos | sin parámetros aún (Fase 0 opcional / Fase 2) | CLI: `aws ssm get-parameters-by-path` (pendiente) |
 | 7 | CloudWatch Logs | 5 GB/mes (ingest + archivo + escaneo) | $0.50/GB ingest | 0 grupos; retención 3 d se aplica por grupo al nacer (sección 7) | CLI: `aws logs describe-log-groups` |
 | 8 | CloudWatch métricas custom | 10/mes | $0.30/métrica·mes | 0 (EMF en Fase 3; ≤4 de lista blanca) | CLI (Fase 3): `aws cloudwatch list-metrics` |
@@ -149,9 +149,12 @@ aws ce get-anomaly-monitors --profile otel-lab
 > El API de creación por CLI exige `MonitorDimension` para monitores `DIMENSIONAL` (un monitor
 > `CUSTOM` requiere igualmente una especificación de dimensión válida); se usa el monitor
 > dimensional de servicio (`SERVICE`), que es el más simple y detecta picos por servicio.
-> **Pendiente de HUMANO (consola):** suscribir el monitor a alertas por correo
-> (`create-anomaly-subscription`); el cableado de notificaciones SNS/correo se completa en la
-> fase de CI/IaC.
+> El monitor **existe** y es el guardarraíl de anomalía **activo** de la cuenta.
+> **Suscripción por correo del monitor: diferida a la fase 5.A (IaC/guardarraíles)**, donde se
+> creará el topic SNS con los permisos adecuados (con la política declarada actual,
+> `aws sns create-topic` responde `AuthorizationError` porque no concede SNS). Mientras tanto la
+> cobertura de alerta por correo sigue activa por otra vía: los budgets `free-tier` ($100/mes) y
+> `otel-lab-daily` ($1/día) tienen suscripción de correo del operador verificada (§3.1-§3.2).
 
 ---
 
@@ -191,14 +194,51 @@ El usuario `otel-lab-deploy` **no** tiene permisos de lectura de IAM, por diseñ
 | `iam:GetUser` / `ListUsers` / `GetUserPolicy` | AccessDenied | **no** hay ningún `iam:*` de escritura/administración |
 
 Conclusión: **NO hay `AdministratorAccess` ni `iam:*` completo**; el usuario opera por acciones
-acotadas. **Paso HUMANO pendiente:** adjuntar el JSON de la política inline al entregable desde la
-consola (el usuario de despliegue no puede leerla por CLI). Contenido declarado de la política
-(PLAN §0.3 / runbook A.3), a codificar como IaC en la fase de IaC:
+acotadas. El JSON de la política inline no es legible por el propio usuario (`iam:ListUserPolicies`
+→ `AccessDenied`, re-verificado 2026-10-11); no obstante, el contenido declarado de la política
+(PLAN §0.3 / runbook A.3) queda registrado en el anexo §4.1, a codificar como IaC en la fase 5.A
+(IaC/guardarraíles):
 
 - Acciones: `ecs:*`, `ecr:*`, `logs:*`, `cloudwatch:*`, `xray:*`, `ssm:*`, `budgets:*`, `ce:*`, `s3:*`, `ec2:*`.
 - `iam:PassRole` **restringido** a `Resource: arn:aws:iam::621236283643:role/otel-lab-*` con
   `Condition: iam:PassedToService = ecs-tasks.amazonaws.com`.
 - Sin `iam:*` de administración, sin credenciales root.
+
+#### 4.1 Anexo — Política inline de `otel-lab-deploy` (declarada)
+
+> **Texto declarado en el runbook §A.3**; el usuario no tiene `iam:Get*` (`AccessDenied`
+> verificado 2026-10-11, §4) por lo que este JSON **no** se ha leído por CLI — la verificación es
+> **funcional, por sondeo comportamental** (§4, tabla de acciones), coherente con el conjunto
+> declarado. Se reproduce el documento de política IAM fiel a la declaración de §A.3 (lista de
+> acciones + `iam:PassRole` restringido); a codificar como IaC en la fase 5.A (IaC/guardarraíles).
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:*", "ecr:*", "logs:*", "cloudwatch:*", "xray:*",
+        "ssm:*", "budgets:*", "ce:*", "s3:*", "ec2:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::621236283643:role/otel-lab-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+Excluye deliberadamente cualquier `iam:*` de administración y las credenciales root (§A.3.2).
 
 ---
 
@@ -209,17 +249,15 @@ aws --version
 # aws-cli/2.32.31 Python/3.13.11 Windows/11 exe/AMD64
 ```
 
-**Session Manager plugin:** **NO instalado** en esta máquina (no está en PATH, no existe en
-`C:\Program Files\Amazon\SessionManagerPlugin\bin`, ni en `Program Files (x86)`, `LOCALAPPDATA`
-ni el perfil de usuario; `where session-manager-plugin` → sin resultado). `aws ssm start-session`
-existe como subcomando del CLI, pero la sesión real requiere el plugin en el **host local**
-(el requisito de instalarlo se cierra como **paso HUMANO**, sección 11).
+**Session Manager plugin:** **INSTALADO** — versión **`1.2.835.0`**. Binario en
+`C:\Program Files\Amazon\SessionManagerPlugin\bin\session-manager-plugin.exe`; ese directorio
+(`C:\Program Files\Amazon\SessionManagerPlugin\bin\`) está en el **PATH de Usuario**. Las
+terminales nuevas lo resuelven; una shell ya abierta antes de la instalación no lo ve hasta
+reiniciarse (hereda el PATH antiguo) — no es un fallo de instalación.
 
-Install-hint (Windows): MSI oficial
-`https://s3.amazonaws.com/session-manager-downloads/plugin/latest/windows/SessionManagerPluginSetup.exe`
-o `winget install Amazon.SessionManagerPlugin`, y reabrir la terminal para que entre en el PATH.
-Verificación: `session-manager-plugin --version` (registrar la versión) y
-`aws ssm start-session --target <id>` contra un workload (Fase 2, cuando exista cómputo).
+`aws ssm start-session` está disponible como subcomando del CLI; la sesión real contra un workload
+se ejercita en la Fase 2 (aún no hay cómputo). Verificación local:
+`session-manager-plugin --version` → `1.2.835.0`.
 
 ---
 
@@ -329,10 +367,10 @@ guardarraíl operativo y se documenta en la sección "Coste" del README.
 |---|---|---|
 | Créditos $100 USD | **Dato declarado por el operador** (2026-10-11) — sin API listable | OK (declarado) |
 | Budgets `free-tier` ($100/mes) y `otel-lab-daily` ($1/día) con alertas 50/80/100 % y 80/100 % | **Volcado CLI §3** | OK |
-| Cost Anomaly Detection: monitor `otel-lab-anomaly` | **Volcado CLI §3.3** | OK (suscripción de correo = HUMANO) |
-| IAM least privilege (sin Admin) | **Sondeo de acciones §4** + `sts get-caller-identity` | OK; JSON inline = HUMANO (consola) |
+| Cost Anomaly Detection: monitor `otel-lab-anomaly` | **Volcado CLI §3.3** | OK (suscripción de correo = diferida a fase 5.A IaC) |
+| IAM least privilege (sin Admin) | **Sondeo de acciones §4** + `sts get-caller-identity` | OK; política inline = declarada (anexo §4.1) |
 | aws-cli versión | **Volcado CLI §5** | OK |
-| Session Manager plugin | — | **FALTA** (install-hint §5) = HUMANO |
+| Session Manager plugin `1.2.835.0` | **Verificación local §5** (ruta + PATH de Usuario) | OK (INSTALADO) |
 | Bucket S3 + lifecycle + ECR + lifecycle | **Volcado CLI §6** | OK (lectura de vuelta del lifecycle S3 = HUMANO) |
 | Retención Logs 3 d / X-Ray / OIDC | **Decisión documentada §7-§9** | OK (acción en Fase 2 / CI) |
 
