@@ -1,0 +1,23 @@
+# .dockerignore — higiene del contexto de build RAIZ.
+#
+# Unico build con contexto raiz: deploy/aws/postgres.Dockerfile (ver
+# target `aws-push`). Su COPY usa rutas explicitas, asi que la basura
+# nunca acaba en la imagen, pero sin este archivo docker ARRASTRA
+# .git/.venv/__pycache__ al daemon en cada build (lento y, en builds
+# futuros con `COPY .`, peligroso: la sesion viva 2026-10-12 demostro
+# exactamente ese fallo).
+#
+# Los demas imagenes usan contextos de subcarpeta (service-a/, service-b/,
+# deploy/collector/) y este archivo NO los afecta.
+.git
+.gitignore
+.gitattributes
+.venv
+.pytest_cache
+**/__pycache__
+*.pyc
+.env
+docs
+tests
+graphify-out
+deploy/aws/task-definition.rendered.json

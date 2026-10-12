@@ -32,7 +32,7 @@
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
         { "name": "SERVICE_B_URL", "value": "http://localhost:8001/api/service-b" },
-        { "name": "INVENTORY_SERVICE_URL", "value": "http://localhost:8001" },
+        { "name": "INVENTORY_SERVICE_URL", "value": "__INVENTORY_URL__" },
         { "name": "OTEL_SERVICE_NAME", "value": "service-a" }
       ],
       "secrets": [
@@ -102,13 +102,13 @@
     },
     {
       "name": "postgres",
-      "image": "public.ecr.aws/docker/library/postgres:16-alpine",
+      "image": "__ECR_REGISTRY__/otel-lab/postgres:__IMAGE_TAG__",
       "essential": true,
       "cpu": 256,
       "memoryReservation": 512,
       "environment": [
-        { "name": "POSTGRES_USER", "value": "otel-lab" },
-        { "name": "POSTGRES_DB", "value": "otel" }
+        { "name": "POSTGRES_USER", "value": "postgres" },
+        { "name": "POSTGRES_DB", "value": "orders" }
       ],
       "secrets": [
         {
@@ -124,7 +124,7 @@
         }
       ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "pg_isready -U otel-lab -d otel || exit 1"],
+        "command": ["CMD-SHELL", "pg_isready -U postgres -d orders || exit 1"],
         "interval": 10,
         "timeout": 5,
         "retries": 5,

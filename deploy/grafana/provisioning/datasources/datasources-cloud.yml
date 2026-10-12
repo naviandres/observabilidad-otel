@@ -1,0 +1,45 @@
+# Grafana datasources de Grafana Cloud (Loki + Tempo) — opcional, aplazado.
+#
+# Este archivo solo tiene efecto cuando el hub de Grafana Cloud se reactiva
+# (los endpoints/token se pasan como variables de entorno al contenedor
+# grafana; sin ellas Grafana registra un error de expansion y el resto de
+# datasources sigue cargando). El modo 100% local usa Jaeger + Prometheus
+# (datasources.yml) y no necesita nada de aqui.
+#
+# El derived field de Loki es el mecanismo de correlacion de PLAN 3.B: cada
+# linea de log con "trace_id":"<32 hex>" se convierte en un Internal link al
+# datasource Tempo (url vacia + datasourceUid = vista de traza nativa).
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: ${__env{GRAFANA_LOKI_URL}}
+    basicAuth: true
+    basicAuthUser: ${__env{GRAFANA_LOKI_USER}}
+    secureJsonData:
+      basicAuthPassword: ${__env{GRAFANA_LOKI_TOKEN}}
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: trace_id
+          matcherRegex: '"trace_id":"([a-f0-9]{32})"'
+          url: ""
+          datasourceUid: tempo
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: ${__env{GRAFANA_TEMPO_URL}}
+    basicAuth: true
+    basicAuthUser: ${__env{GRAFANA_TEMPO_USER}}
+    secureJsonData:
+      basicAuthPassword: ${__env{GRAFANA_TEMPO_TOKEN}}
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceId: true

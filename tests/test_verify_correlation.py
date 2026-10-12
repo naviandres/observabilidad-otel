@@ -96,7 +96,7 @@ def test_generate_traceparent_is_unique_per_call(vc):
 def test_required_failures_ignores_skip_and_pass(vc):
     report = vc.CorrelationReport()
     report.register(1, vc.PASS)
-    report.register(3, vc.SKIP, razon=vc.AWS_CORRELATION_SKIP_REASON)
+    report.register(3, vc.SKIP, razon=vc.AWS_SKIP_REASON)
     report.register(10, vc.SKIP, razon=vc.GCP_SKIP_REASON)
     assert report.required_failures == []
     report.register(12, vc.FAIL, razon="cero incremento")
@@ -119,14 +119,14 @@ def test_local_mode_exits_zero_with_expected_skips(vc, monkeypatch, tmp_path):
     for assertion_id in range(3, 10):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
-        assert row["razon"] == "la verificación del lado AWS (despliegue AWS aun no disponible)"
+        assert row["razon"] == "AWS no incluido (ejecutar con --include-aws)"
     for assertion_id in (10, 11, 12):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
         assert "--include-gcp" in row["razon"]
     row13 = _assertion(payload, 13)
     assert row13["estado"] == "SKIP"
-    assert row13["razon"] == "despliegue AWS no disponible (cuenta en sandbox)"
+    assert "--include-aws" in row13["razon"] and "--include-gcp" in row13["razon"]
 
 
 def test_evidence_json_schema_and_markdown_mirror(vc, monkeypatch, tmp_path):
@@ -197,7 +197,7 @@ def _gcp_transport(trace_spans=None, log_entries=None, metric_types=None, series
                 "metricDescriptors": [{"type": t} for t in (metric_types or [])]
             }
         if "timeSeries" in url:
-            return 200, {}, {"timeSeries": series or []}
+            return 200, {}, {"timeSeries": _expand_counter_series(series or [], url)}
         # POST /orders echo
         traceparent = (headers or {}).get("traceparent", "")
         tid = traceparent.split("-")[1] if len(traceparent.split("-")) == 4 else "0" * 32
@@ -228,16 +228,53 @@ def _log_entry(container: str) -> dict[str, Any]:
 
 
 def _counter_series(values: list[int]) -> dict[str, Any]:
-    return {
-        "metric": {"type": "prometheus.googleapis.com/orders_created_total/counter"},
-        "points": [
+    """Marker for a GMP counter series expanded per request (see transport).
+
+    Ronda 6: el script ancla la ventana al inicio de la corrida (run_started)
+    y calcula el incremento como (ultimo punto dentro) - (ultimo punto antes,
+    0 si nace dentro). Los puntos deben generarse RELATIVOS al intervalo que
+    pide cada request (run_started no se conoce al construir el fixture):
+    ``[v]`` = un punto dentro (nace en la ventana, incremento v);
+    ``[baseline, current]`` = baseline antes de run_started y current dentro
+    (incremento current - baseline).
+    """
+    return {"__counter_values__": values}
+
+
+def _expand_counter_series(series: list[dict[str, Any]], url: str) -> list[dict[str, Any]]:
+    """Materialize ``_counter_series`` markers against the requested interval."""
+    import urllib.parse
+
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    start = query.get("interval.startTime", ["1970-01-01T00:00:00Z"])[0]
+    end = query.get("interval.endTime", ["2100-01-01T00:00:00Z"])[0]
+
+    def _point(ts: str, v: int) -> dict[str, Any]:
+        return {
+            "value": {"int64Value": str(v)},
+            "interval": {"startTime": start, "endTime": ts},
+        }
+
+    out: list[dict[str, Any]] = []
+    for item in series or []:
+        values = item.get("__counter_values__")
+        if values is None:
+            out.append(item)
+            continue
+        if len(values) == 1:
+            points = [_point(end, values[0])]
+        else:
+            # El script consulta [run_started-180s, now]: el baseline cae en
+            # el primer minuto del intervalo (antes de run_started) y el
+            # current al final (dentro).
+            points = [_point(start[:16] + "30Z", values[0]), _point(end, values[-1])]
+        out.append(
             {
-                "value": {"int64Value": str(v)},
-                "interval": {"startTime": f"2026-10-11T00:00:0{i}Z", "endTime": f"2026-10-11T00:00:0{i+1}Z"},
+                "metric": {"type": "prometheus.googleapis.com/orders_created_total/counter"},
+                "points": points,
             }
-            for i, v in enumerate(values)
-        ],
-    }
+        )
+    return out
 
 
 @pytest.fixture
@@ -361,6 +398,61 @@ def test_cloud_logging_text_payload_logger_attribution(vc, monkeypatch, tmp_path
     assert row["detalles"]["servicios"] == ["service-a", "service-b"]
 
 
+def _otlp_log_entry(service: str, trace: str) -> dict[str, Any]:
+    """Live OTLP LoggingHandler shape (Ronda 6, 2026-10-12, Cloud Logging).
+
+    El exporter googlecloud escribe el mensaje del LoggingHandler como
+    textPayload plano, normaliza logging.googleapis.com/trace y deja el
+    service.name del resource en los LABELS DE LA ENTRADA (no en el resource,
+    que queda k8s_cluster por resourcedetection). Sin k8s_container labels ni
+    jsonPayload: la unica atribucion posible es entry.labels["service.name"].
+    """
+    return {
+        "logName": "projects/p/logs/otel-app-logs",
+        "resource": {
+            "type": "k8s_cluster",
+            "labels": {"cluster_name": "otel-lab-std", "location": "us-central1-a"},
+        },
+        "labels": {"service.name": service, "instrumentation_source": service},
+        "textPayload": "Order completed: uuid-1",
+        "severity": "INFO",
+        "trace": f"projects/p/traces/{trace}",
+    }
+
+
+def test_cloud_logging_otlp_service_name_label_attribution(vc, monkeypatch, tmp_path, gcp_enabled):
+    """A11 con la vertiente OTLP: textPayload + labels.service.name + trace."""
+    entries = [_otlp_log_entry("service-a", "t"), _otlp_log_entry("service-b", "t")]
+    transport = _gcp_transport(
+        trace_spans=[_span("order.process"), _span("inventory.query")],
+        log_entries=entries,
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(vc, monkeypatch, transport, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 0
+    row = _assertion(_read_payload(json_path), 11)
+    assert row["estado"] == "PASS"
+    assert row["detalles"]["servicios"] == ["service-a", "service-b"]
+
+
+def test_cloud_logging_otlp_collector_self_log_not_attributed(vc, monkeypatch, tmp_path, gcp_enabled):
+    """labels.service.name=otelcol-contrib nunca cuenta como servicio."""
+    entry = _otlp_log_entry("service-a", "t")
+    decoy = _otlp_log_entry("service-b", "t")
+    decoy["labels"]["service.name"] = "otelcol-contrib"
+    transport = _gcp_transport(
+        trace_spans=[_span("order.process"), _span("inventory.query")],
+        log_entries=[entry, decoy],
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(vc, monkeypatch, transport, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 1
+    row = _assertion(_read_payload(json_path), 11)
+    assert row["detalles"]["servicios"] == ["service-a"]
+
+
 def test_cloud_logging_uses_resource_names_body(vc, monkeypatch, tmp_path, gcp_enabled):
     """entries:list takes `resourceNames`; `projectNames` is a 400 regression."""
     bodies: list[dict[str, Any]] = []
@@ -387,7 +479,7 @@ def test_cloud_logging_falls_back_to_json_payload_filter(vc, monkeypatch, tmp_pa
         if "logging.googleapis.com" in url:
             used = body["filter"]
             calls.append(used)
-            if used.startswith("trace:"):
+            if 'trace:"' in used:
                 return 200, {}, {"entries": []}
             return 200, {}, {"entries": [_log_entry("service-a"), _log_entry("service-b")]}
         return _gcp_transport(
@@ -398,8 +490,33 @@ def test_cloud_logging_falls_back_to_json_payload_filter(vc, monkeypatch, tmp_pa
 
     rc, json_path = _run_main(vc, monkeypatch, only_fallback, tmp_path, extra_args=["--include-gcp"])
     assert rc == 0
-    assert any(f.startswith("jsonPayload.trace_id=") for f in calls)
+    assert any('jsonPayload.trace_id="' in f for f in calls)
     assert _assertion(_read_payload(json_path), 11)["estado"] == "PASS"
+
+
+def test_cloud_logging_filters_are_timestamp_bounded(vc, monkeypatch, tmp_path, gcp_enabled):
+    """Ronda 6: entries:list sin cota timestamp> devuelve 0 intermitentemente.
+
+    Verificado en vivo 2026-10-12: la misma consulta trace:"..." sin cota da
+    0 resultados y con timestamp>=... da las 3 entradas reales. Todos los
+    filtros de la cadena A11 deben llevar la cota.
+    """
+    calls: list[str] = []
+
+    def spy(method, url, headers=None, body=None, timeout=15.0):
+        if "logging.googleapis.com" in url:
+            calls.append(body["filter"])
+            return 200, {}, {"entries": [_log_entry("service-a"), _log_entry("service-b")]}
+        return _gcp_transport(
+            trace_spans=[_span("order.process"), _span("inventory.query")],
+            metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+            series=[_counter_series([1])],
+        )(method, url, headers, body, timeout)
+
+    rc, _json = _run_main(vc, monkeypatch, spy, tmp_path, extra_args=["--include-gcp"])
+    assert rc == 0
+    assert calls, "A11 must query Cloud Logging"
+    assert all(f.startswith('timestamp>="') for f in calls), calls
 
 
 def test_cloud_monitoring_zero_increment_fails(vc, monkeypatch, tmp_path, gcp_enabled):
@@ -539,19 +656,50 @@ def test_gcloud_token_missing_binary_raises_auth_error(vc, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A13 cross-cloud gate
+# A13 cross-cloud gate + honest AWS-side degradation
 # ---------------------------------------------------------------------------
 
 
-def test_include_aws_without_cli_data_skips(vc, monkeypatch, tmp_path):
-    def no_cli(cmd, capture_output, text, timeout, check):
-        raise OSError("aws not found")
+def test_include_aws_without_gcp_skips_cross_cloud(vc, monkeypatch, tmp_path):
+    """--include-aws alone: A3-A9 FAIL honestly (no boto3) and A13 SKIPs."""
 
-    monkeypatch.setattr(vc.subprocess, "run", no_cli)
+    def no_boto3(service, profile, region):
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(vc, "make_aws_client", no_boto3)
     rc, json_path = _run_main(
         vc, monkeypatch, _echoing_http_request(vc), tmp_path, extra_args=["--include-aws"]
     )
-    assert rc == 0
+    payload = _read_payload(json_path)
+    assert rc == 1  # required AWS assertions failed honestly
+    for assertion_id in range(3, 10):
+        row = _assertion(payload, assertion_id)
+        assert row["estado"] == "FAIL"
+        assert "boto3" in row["razon"]
+    row13 = _assertion(payload, 13)
+    assert row13["estado"] == "SKIP"
+    assert "--include-gcp" in row13["razon"]
+
+
+def test_both_flags_without_boto3_fails_cross_cloud(vc, monkeypatch, tmp_path):
+    """With both flags but no boto3 the AWS side is not evaluable: A13 FAILs."""
+
+    def no_boto3(service, profile, region):
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(vc, "make_aws_client", no_boto3)
+    monkeypatch.setattr(vc, "gcloud_access_token", lambda project, timeout=30.0: "fake-token")
+    transport = _gcp_transport(
+        trace_spans=[_span("order.process", "service-a"), _span("inventory.query", "service-b")],
+        log_entries=[_log_entry("service-a"), _log_entry("service-b")],
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(
+        vc, monkeypatch, transport, tmp_path,
+        extra_args=["--include-aws", "--include-gcp"],
+    )
+    assert rc == 1
     row = _assertion(_read_payload(json_path), 13)
-    assert row["estado"] == "SKIP"
-    assert "despliegue AWS no disponible" in row["razon"]
+    assert row["estado"] == "FAIL"
+    assert "lado AWS no evaluable" in row["razon"]

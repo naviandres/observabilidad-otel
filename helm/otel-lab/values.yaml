@@ -10,6 +10,17 @@ global:
   region: us-central1
   environment: lab
 
+# expose — cable del flujo cruzado de nubes (verificacion de correlacion).
+# Default OFF: el perfil normal del despliegue GKE es 100% ClusterIP (sin
+# balanceadores publicos). El toggle crea SOLO un Service type LoadBalancer
+# REGIONAL para service-b, para que el service-a desplegado en AWS (ECS) lo
+# alcance por su IP publica y el trace_id W3C viaje entre las dos nubes.
+# Coste de la excepcion: ~$0.025/h de regla de reenvio regional + egress;
+# vive y muere con el cluster (teardown = gcp-destroy) y su duracion queda
+# acotada a la sesion de nube.
+expose:
+  serviceBLoadBalancer: false
+
 # Spot node pool: los pods se programan contra el pool spot (e2-medium via
 # Terraform; e2-small solo en el camino legado del Makefile) con su
 # taint estandar de GKE (tolerancia a desalojo: grace bajo + preStop, R-22).
@@ -49,6 +60,15 @@ secrets:
     # Requiere en el cluster: driver + provider-gcp instalados
     # (aqui via add-on --enable-secret-manager). Sin driver, los pods quedan
     # en ContainerCreating.
+
+metrics:
+  # Ronda 6 (A12): periodo de export de metricas de los services hacia el
+  # collector. Cloud Monitoring/GMP solo acepta una escritura por metric-type
+  # cada 60 s (periodo de muestreo); con el reader a 5 s los lotes del
+  # exporter googlecloud fallaban enteros (FailedPrecondition "written more
+  # frequently than the maximum sampling period") y orders_created_total no
+  # incrementaba. telemetry.py lee este valor via OTEL_METRIC_EXPORT_INTERVAL.
+  exportIntervalMillis: 60000
 
 collector:
   image:

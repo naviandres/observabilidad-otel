@@ -36,6 +36,12 @@ spec:
               value: "service-b"
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "service.name=service-b"
+            # Ronda 6 (A12): Cloud Monitoring/GMP solo acepta escrituras de un
+            # metric-type cada 60 s; el reader OTel del service exporta a ese
+            # ritmo (telemetry.py respeta esta variable; AWS no la fija y sigue
+            # a 5 s para EMF).
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.metrics.exportIntervalMillis | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.serviceB.containerPort }}
@@ -70,3 +76,27 @@ spec:
     - name: http
       port: {{ .Values.serviceB.servicePort }}
       targetPort: http
+{{- if .Values.expose.serviceBLoadBalancer }}
+---
+# Excepcion de sesion unica para el flujo cruzado de nubes (ver values.expose):
+# LB REGIONAL (misma region que el cluster) etiquetado con el entorno del lab.
+# Se apaga con --set expose.serviceBLoadBalancer=false y muere con el cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-b-lb
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service-b
+    env: {{ .Values.global.environment }}
+  annotations:
+    networking.gke.io/load-balancer-type: "Regional"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: service-b
+  ports:
+    - name: http
+      port: {{ .Values.serviceB.servicePort }}
+      targetPort: http
+{{- end }}

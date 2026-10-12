@@ -3,3 +3,8 @@
 -r service-a/requirements.txt
 
 pytest==8.4.2
+
+# boto3 is used ONLY by scripts/verify_correlation.py --include-aws (X-Ray /
+# CloudWatch reads inside the free tier). The import is lazy, so the offline
+# suite and local mode never need it installed.
+boto3==1.43.111
