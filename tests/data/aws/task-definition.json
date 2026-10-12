@@ -1,0 +1,179 @@
+{
+  "family": "otel-lab",
+  "taskRoleArn": "arn:aws:iam::621236283643:role/otel-lab-task-ecs",
+  "executionRoleArn": "arn:aws:iam::621236283643:role/otel-lab-exec-ecs",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "enableExecuteCommand": true,
+  "volumes": [
+    {
+      "name": "postgres-data"
+    }
+  ],
+  "tags": [
+    { "key": "project", "value": "otel-lab" },
+    { "key": "env", "value": "lab" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "service-a",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-a:0.1.0",
+      "essential": true,
+      "cpu": 256,
+      "memoryReservation": 512,
+      "portMappings": [
+        { "containerPort": 8080, "hostPort": 8080, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
+        { "name": "SERVICE_B_URL", "value": "http://localhost:8081/api/service-b" },
+        { "name": "DB_HOST", "value": "localhost" },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_NAME", "value": "otel" },
+        { "name": "DB_USER", "value": "otel-lab" },
+        { "name": "DB_PASSWORD", "value": "otel-lab" },
+        { "name": "OTEL_SERVICE_NAME", "value": "service-a" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=5)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/otel/labs/ecs-platform/service-a",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "service-a",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "service-b",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-b:0.1.0",
+      "essential": true,
+      "cpu": 256,
+      "memoryReservation": 512,
+      "portMappings": [
+        { "containerPort": 8081, "hostPort": 8081, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
+        { "name": "DB_HOST", "value": "localhost" },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_NAME", "value": "otel" },
+        { "name": "DB_USER", "value": "otel-lab" },
+        { "name": "DB_PASSWORD", "value": "otel-lab" },
+        { "name": "OTEL_SERVICE_NAME", "value": "service-b" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8081/health',timeout=5)\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/otel/labs/ecs-platform/service-b",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "service-b",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "postgres",
+      "image": "public.ecr.aws/docker/library/postgres:16-alpine",
+      "essential": true,
+      "cpu": 256,
+      "memoryReservation": 512,
+      "environment": [
+        { "name": "POSTGRES_USER", "value": "otel-lab" },
+        { "name": "POSTGRES_PASSWORD", "value": "otel-lab" },
+        { "name": "POSTGRES_DB", "value": "otel" }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "postgres-data",
+          "containerPath": "/var/lib/postgresql/data",
+          "readOnly": false
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "pg_isready -U otel-lab -d otel || exit 1"],
+        "interval": 10,
+        "timeout": 5,
+        "retries": 5,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/otel/labs/ecs-platform/postgres",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "postgres",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "otel-collector",
+      "image": "621236283643.dkr.ecr.us-east-1.amazonaws.com/otel-lab/otel-collector:0.1.0",
+      "essential": true,
+      "cpu": 512,
+      "memoryReservation": 768,
+      "command": ["--config=file:/cfg/otel-collector-aws.yaml"],
+      "portMappings": [
+        { "containerPort": 4317, "hostPort": 4317, "protocol": "tcp" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/otel/labs/ecs-platform/otel-collector",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "otel-collector",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "cloudwatch-agent",
+      "image": "public.ecr.aws/cloudwatch-agent/cloudwatch-agent:1.300073.0b1828",
+      "essential": false,
+      "cpu": 256,
+      "memoryReservation": 256,
+      "secrets": [
+        {
+          "name": "CW_CONFIG_CONTENT",
+          "valueFrom": "arn:aws:ssm:us-east-1:621236283643:parameter/otel-lab/cloudwatch-agent/config"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/otel/labs/ecs-platform/cloudwatch-agent",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "cloudwatch-agent",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}
