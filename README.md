@@ -267,3 +267,48 @@ helm upgrade --install otel-lab helm/otel-lab --namespace otel-lab `
   --set collector.resources.requests.cpu=20m --set serviceA.resources.requests.cpu=20m `
   --set serviceB.resources.requests.cpu=20m --set postgres.resources.requests.cpu=20m
 ```
+
+## Sesión dual-cloud (correlación cruzada de nubes, aserción 13 de PLAN §3.A)
+
+El `trace_id` W3C cruza la frontera AWS↔GCP cuando **service-a corre en ECS y
+llama al service-b de GKE** expuesto por su LoadBalancer regional. Orden
+completo de la sesión (todo lo demás queda probado offline):
+
+1. **GCP primero** (el LB debe existir antes de renderizar la task AWS):
+   ```powershell
+   make gcp-start                          # cluster zonal spot (fee $0.10/h)
+   # build/push de service-a/b a Artifact Registry (tabla de arriba)
+   make deploy-gcp                         # helm install (ClusterIP por defecto)
+   make gcp-expose                         # UNICO LB del lab: service-b-lb regional
+   kubectl -n otel-lab get svc service-b-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+   ```
+2. **AWS con la URL cruzada** (el token `__INVENTORY_URL__` de la task def):
+   ```powershell
+   make aws-push
+   make aws-start INVENTORY_URL=http://<LB_IP>:8001   # service-a(ECS) -> service-b(GKE)
+   ```
+3. **Túneles AWS** (dos terminales o el modo Task de una sola vez):
+   ```powershell
+   pwsh -File scripts/tunnel.ps1 -Mode Task -TaskPorts 8000,8889
+   # 8000 = service-a (endpoint de inyeccion) · 8889 = scrape Prometheus del collector
+   ```
+4. **Verificación dual** (boto3 profile `otel-lab` + ADC `gcloud` en la máquina):
+   ```powershell
+   make verify-correlation-dual VERIFY_ENDPOINT=http://localhost:8000
+   # equivalente a mano:
+   python scripts/verify_correlation.py --endpoint http://localhost:8000 `
+     --include-aws --include-gcp
+   ```
+   A13 exige ambas banderas: el MISMO `trace_id` inyectado debe aparecer en una
+   señal AWS (X-Ray por estructura — R-03 — o CloudWatch Logs del exportador
+   `/otel/labs/ecs-cluster/*`) **y** en una GCP (Cloud Trace o Cloud Logging).
+5. **Teardown en orden inverso** (DoD §3.5): `make aws-stop`/`aws-destroy` →
+   `make gcp-destroy` (el LB muere con el cluster). Coste de la sesión ≈
+   Fargate ($0.05/h) + fee GKE ($0.10/h) + LB regional ($0.025/h) + egress:
+   una sesión de 2 h queda en ~$0.40 dentro de los créditos.
+
+Para cerrar **A3–A9** (pipeline AWS completo: ambos servicios en la task) se
+hace una corrida adicional con el default `INVENTORY_URL=http://localhost:8001`
+y solo `--include-aws`; las aserciones GCP (A10–A12) ya se cerraron con la
+corrida `--include-gcp` contra GKE interno. La evidencia final es la union de
+las tres corridas documentada en `docs/evidence/03-correlation.md`.
