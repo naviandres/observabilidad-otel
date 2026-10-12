@@ -32,6 +32,7 @@ it is stored as SSM SecureString parameters and only referenced by ARN.
 | `__AWS_REGION__` | `AWS_REGION` make variable (`us-east-1`) |
 | `__ECR_REGISTRY__` | `$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com` |
 | `__IMAGE_TAG__` | `IMAGE_TAG` make variable (a fixed version, never `latest`) |
+| `__INVENTORY_URL__` | `INVENTORY_URL` make variable (default `http://localhost:8001` — the in-task `service-b`; pass the other cloud's load-balancer URL for the cross-cloud flow) |
 
 ## SSM parameters (SecureString) referenced by ARN
 

@@ -70,3 +70,27 @@ spec:
     - name: http
       port: {{ .Values.serviceB.servicePort }}
       targetPort: http
+{{- if .Values.expose.serviceBLoadBalancer }}
+---
+# Excepcion de sesion unica para el flujo cruzado de nubes (ver values.expose):
+# LB REGIONAL (misma region que el cluster) etiquetado con el entorno del lab.
+# Se apaga con --set expose.serviceBLoadBalancer=false y muere con el cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-b-lb
+  labels:
+    {{- include "otel-lab.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service-b
+    env: {{ .Values.global.environment }}
+  annotations:
+    networking.gke.io/load-balancer-type: "Regional"
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: service-b
+  ports:
+    - name: http
+      port: {{ .Values.serviceB.servicePort }}
+      targetPort: http
+{{- end }}

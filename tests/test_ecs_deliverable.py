@@ -109,13 +109,26 @@ def test_health_checks_probe_metrics_not_health():
 
 
 def test_service_a_reaches_service_b_via_localhost():
-    """awsvpc = mismo netns: service-a llama a service-b por localhost:8001."""
+    """awsvpc = mismo netns: el default de INVENTORY_URL es localhost:8001.
+
+    El template lleva el token __INVENTORY_URL__ (render de aws-start) para
+    poder repuntar el service-b al balanceador de la otra nube en el flujo
+    cruzado; el render por defecto del fixture mantiene localhost:8001.
+    """
     svc_a = _containers(_task_def())["service-a"]
     env = {e["name"]: e["value"] for e in svc_a["environment"]}
     assert env["SERVICE_B_URL"] == "http://localhost:8001/api/service-b"
-    # la app lee INVENTORY_SERVICE_URL (app/main.py); sin esto cae al default
+    # la app lee INVENTORY_SERVICE_URL (app/main.py); sin render cae al default
     # `http://service-b:8001`, inresoluble dentro de la task Fargate.
-    assert env["INVENTORY_SERVICE_URL"] == "http://localhost:8001"
+    assert env["INVENTORY_SERVICE_URL"] == "__INVENTORY_URL__"
+    fixture_env = {
+        e["name"]: e["value"]
+        for e in _containers(_task_def(RENDERED_FIXTURE))["service-a"]["environment"]
+    }
+    assert fixture_env["INVENTORY_SERVICE_URL"] == "http://localhost:8001"
+    make_text = MAKEFILE.read_text(encoding="utf-8")
+    assert re.search(r"^INVENTORY_URL\s+\?=\s+http://localhost:8001\s*$", make_text, re.M)
+    assert "s#__INVENTORY_URL__#$(INVENTORY_URL)#g" in make_text
 
 
 def test_collector_command_uses_baked_config_path():
@@ -166,6 +179,7 @@ def test_rendered_fixture_matches_template():
         ("__AWS_REGION__", "us-east-1"),
         ("__ECR_REGISTRY__", "621236283643.dkr.ecr.us-east-1.amazonaws.com"),
         ("__IMAGE_TAG__", "0.1.0"),
+        ("__INVENTORY_URL__", "http://localhost:8001"),
     ]:
         tpl = tpl.replace(token, value)
     assert tpl == data

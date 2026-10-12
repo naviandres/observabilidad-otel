@@ -32,7 +32,7 @@
       "environment": [
         { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
         { "name": "SERVICE_B_URL", "value": "http://localhost:8001/api/service-b" },
-        { "name": "INVENTORY_SERVICE_URL", "value": "http://localhost:8001" },
+        { "name": "INVENTORY_SERVICE_URL", "value": "__INVENTORY_URL__" },
         { "name": "OTEL_SERVICE_NAME", "value": "service-a" }
       ],
       "secrets": [

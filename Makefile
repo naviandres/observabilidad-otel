@@ -40,12 +40,23 @@ EXEC_ROLE       ?= otel-lab-exec-ecs
 NET_NAME        ?= otel-lab
 VPC_CIDR        ?= 10.20.0.0/16
 SUBNET_CIDR     ?= 10.20.1.0/24
+# service-a llama a service-b por este render de task-def (token
+# __INVENTORY_URL__). Default: el service-b de la MISMA task (localhost).
+# Para el flujo cross-cloud (AWS -> GCP) pasarlo al LB de `make gcp-expose`:
+#   make aws-start INVENTORY_URL=http://<LB_IP>:8001
+INVENTORY_URL   ?= http://localhost:8001
+
+# --- Verificacion de correlacion (PLAN 3.A) ---------------------------------
+PYTHON          ?= python3
+VERIFY_ENDPOINT ?= http://localhost:8080
 
 AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
 
-.PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp port-gcp port-jaeger-gcp \
+.PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp gcp-expose port-gcp port-jaeger-gcp \
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
-        tunnel validate-collector
+        tunnel validate-collector \
+        verify-correlation verify-correlation-gcp verify-correlation-aws \
+        verify-correlation-dual
 
 # gcp-start — cluster GKE Standard ZONAL us-central1-a, release channel regular,
 # 1 nodo spot e2-small con autoscaling 0-1, private Google Access (SIN Cloud
@@ -103,6 +114,24 @@ deploy-gcp:
 	  --set global.region=$(GCP_REGION) \
 	  --set collector.env.OTEL_TRACES_EXPORTER=$(OTEL_TRACES_EXPORTER)
 	kubectl -n $(GCP_NAMESPACE) rollout status deployment/otel-lab-collector --timeout=180s
+
+# gcp-expose — habilita el Service type LoadBalancer REGIONAL de service-b
+# (toggle expose.serviceBLoadBalancer del chart; default OFF). Es el unico
+# punto de entrada publico del lab GCP y existe solo para el flujo cruzado
+# AWS -> GCP de la verificacion de correlacion (service-a en ECS llamando al
+# service-b de GKE). Coste: ~$0.025/h de regla de reenvio + egress; se apaga
+# con --set expose.serviceBLoadBalancer=false o con gcp-destroy (el cluster
+# se lleva el LB puesto).
+gcp-expose:
+	helm upgrade --install otel-lab helm/otel-lab \
+	  --namespace $(GCP_NAMESPACE) --create-namespace \
+	  --set global.project=$(GCP_PROJECT_ID) \
+	  --set global.region=$(GCP_REGION) \
+	  --set collector.env.OTEL_TRACES_EXPORTER=$(OTEL_TRACES_EXPORTER) \
+	  --set expose.serviceBLoadBalancer=true
+	@echo ">> IP del LB (tarda ~1 min en asignarse):"
+	@echo "   kubectl -n $(GCP_NAMESPACE) get svc service-b-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'"
+	@echo ">> despues: make aws-start INVENTORY_URL=http://<LB_IP>:8001"
 
 # port-gcp — acceso SIN ingress publico (§2.B-GCP/C4): port-forward autenticado.
 # svc/service-a 8080:8080 (k6/correlacion) + collector 4317 (OTLP) y 8889
@@ -203,6 +232,7 @@ aws-start: aws-net-create
 	    -e 's#__AWS_REGION__#$(AWS_REGION)#g' \
 	    -e 's#__ECR_REGISTRY__#$(ECR_REGISTRY)#g' \
 	    -e 's#__IMAGE_TAG__#$(IMAGE_TAG)#g' \
+	    -e 's#__INVENTORY_URL__#$(INVENTORY_URL)#g' \
 	    deploy/aws/task-definition.json > deploy/aws/task-definition.rendered.json; \
 	$(AWS) ecs register-task-definition --cli-input-json file://deploy/aws/task-definition.rendered.json --query 'taskDefinition.taskDefinitionArn' --output text; \
 	if [ -n "$$($(AWS) ecs describe-services --cluster $(ECS_CLUSTER) --services $(ECS_SERVICE) --query 'services[?status==`ACTIVE`].serviceName' --output text)" ]; then \
@@ -264,3 +294,29 @@ validate-collector:
 	docker run --rm -v "$$(pwd)/deploy/collector:/cfg" \
 	  otel/opentelemetry-collector-contrib:0.162.0 \
 	  validate --config=/cfg/otel-collector-local.yaml
+
+# ===========================================================================
+# Verificacion de correlacion (PLAN 3.A). El framework decide su salida:
+# exit !=0 SOLO si una asercion obligatoria queda en FAIL; los SKIP de las
+# banderas no activas nunca rompen el target local.
+#   verify-correlation          modo local (A1/A2 + SKIPs; necesita el stack
+#                               compose arriba y service-a en VERIFY_ENDPOINT)
+#   verify-correlation-gcp      + Cloud Trace/Logging/Monitoring (ADC gcloud)
+#   verify-correlation-aws      + X-Ray/CloudWatch (boto3, perfil otel-lab)
+#   verify-correlation-dual     ambas banderas: evalua la asercion cruzada A13
+# El scrape Prometheus de A8/A9 va a --prometheus-url (default :8889): en la
+# sesion AWS se alcanza via `make tunnel` (modo Task), no via compose.
+# ===========================================================================
+
+verify-correlation:
+	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT)
+
+verify-correlation-gcp:
+	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) --include-gcp
+
+verify-correlation-aws:
+	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) --include-aws
+
+verify-correlation-dual:
+	$(PYTHON) scripts/verify_correlation.py --endpoint $(VERIFY_ENDPOINT) \
+	  --include-aws --include-gcp
