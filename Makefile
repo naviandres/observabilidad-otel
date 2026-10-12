@@ -60,7 +60,8 @@ AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
 
 .PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp gcp-expose port-gcp port-jaeger-gcp \
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
-        aws-access-grant aws-access-revoke aws-verify validate-collector \
+        aws-access-grant aws-access-revoke aws-verify aws-dashboard aws-alarms \
+        validate-collector \
         verify-correlation verify-correlation-gcp verify-correlation-aws \
         verify-correlation-dual
 
@@ -305,6 +306,23 @@ aws-verify:
 	 if [ "$$ip" = "None" ] || [ -z "$$ip" ]; then echo "ERROR: la task no tiene IP publica en el ENI $$eni"; exit 1; fi; \
 	 echo ">> task publica: $$ip (endpoint :8000, scrape :8889)"; \
 	 $(PYTHON) scripts/verify_correlation.py --endpoint http://$$ip:8000 --include-aws --prometheus-url http://$$ip:8889/metrics
+
+# aws-dashboard — panel AWS-native complementario (PLAN 3.C): 3 widgets maximo
+# sobre los contadores EMF que SI existen (namespace OtelLab). put-dashboard es
+# idempotente (reemplaza el dashboard homonimo). Coste: ~$0 — los dashboards no
+# facturan y no hay sesion de computo; las metricas referenciadas ya se publican.
+# La lectura de estos datos la hace la consola/API de CloudWatch, NUNCA
+# GetMetricData desde Grafana (R-05: el dashboard de 6 paneles vive en Prometheus).
+aws-dashboard:
+	$(AWS) cloudwatch put-dashboard --dashboard-name otel-lab-slo \
+	  --dashboard-body file://dashboards/cloudwatch-slo.json
+
+# aws-alarms — 2 alarmas de guardraíl desde dashboards/cloudwatch-alarms.json
+# (ratio de error EMF y degradacion de DB como aproximacion disponible de la
+# p99; ver el JSON y docs/evidence/05-dashboards-local.md para las desviaciones).
+# Idempotente via put-metric-alarm. Sin acciones SNS (deuda del guardraíl).
+aws-alarms:
+	pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
 
 # validate-collector — PLAN §2.C: el binario ADOT (v0.46.0) NO tiene subcomando
 # `validate`; se valida por ARRANQUE limpio ("Everything is ready" == exit 0).

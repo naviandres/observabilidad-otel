@@ -1,0 +1,118 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Request rate (orders created, EMF)",
+        "stat": "Sum",
+        "period": 300,
+        "region": "us-east-1",
+        "view": "timeSeries",
+        "stacked": false,
+        "metrics": [
+          [
+            "OtelLab",
+            "orders_created_total",
+            "service.name",
+            "service-a",
+            "cloud.provider",
+            "aws",
+            "deployment.environment",
+            "lab",
+            { "id": "m1" }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Error rate (orders_failed / orders_created, %)",
+        "stat": "Sum",
+        "period": 300,
+        "region": "us-east-1",
+        "view": "timeSeries",
+        "stacked": false,
+        "metrics": [
+          [
+            "OtelLab",
+            "orders_created_total",
+            "service.name",
+            "service-a",
+            "cloud.provider",
+            "aws",
+            "deployment.environment",
+            "lab",
+            { "id": "m1" }
+          ],
+          [
+            "OtelLab",
+            "orders_failed_total",
+            "service.name",
+            "service-a",
+            "cloud.provider",
+            "aws",
+            "deployment.environment",
+            "lab",
+            { "id": "m2" }
+          ],
+          [
+            {
+              "expression": "(m2/m1)*100",
+              "id": "e1",
+              "label": "error ratio %"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 6,
+      "width": 24,
+      "height": 6,
+      "properties":
+     {
+        "title": "Dependencia y pagos (sustituto de CPUUtilization: cw-agent exit 1 y sin ContainerInsights; ver docs/evidence/05-dashboards-local.md)",
+        "stat": "Sum",
+        "period": 300,
+        "region": "us-east-1",
+        "view": "timeSeries",
+        "stacked": false,
+        "metrics": [
+          [
+            "OtelLab",
+            "db_query_errors_total",
+            "service.name",
+            "service-a",
+            "cloud.provider",
+            "aws",
+            "deployment.environment",
+            "lab",
+            { "id": "m1" }
+          ],
+          [
+            "OtelLab",
+            "payment_authorization_failures_total",
+            "service.name",
+            "service-a",
+            "cloud.provider",
+            "aws",
+            "deployment.environment",
+            "lab",
+            { "id": "m2" }
+          ]
+        ]
+      }
+    }
+  ]
+}

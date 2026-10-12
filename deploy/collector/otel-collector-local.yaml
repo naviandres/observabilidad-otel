@@ -122,7 +122,10 @@ service:
       processors: [memory_limiter, resourcedetection, resource, batch]
       exporters: [otlp/jaeger]
     metrics:
-      receivers: [otlp, prometheus]
+      # hostmetrics wired into the pipeline: PLAN §2.A declares it as the local
+      # stand-in for Container Insights, and the SLO dashboard's CPU panel reads
+      # it from the :8889 scrape (it was declared but never consumed before).
+      receivers: [otlp, prometheus, hostmetrics]
       processors: [memory_limiter, resourcedetection, resource, batch]
       exporters: [prometheus]
     logs:

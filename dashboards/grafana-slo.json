@@ -5,8 +5,8 @@
   "title": "OpenTelemetry SLO Dashboard",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
-  "refresh": "",
+  "version": 4,
+  "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
   "templating": {
     "list": [
@@ -42,32 +42,78 @@
   "panels": [
     {
       "id": 1,
-      "title": "Tasa de peticiones por segundo (RPS)",
+      "title": "Request rate",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "description": "SLI 1 (PLAN 3.C). Query base del PLAN: sum(rate(http_server_duration_count[5m])) by service_name. Nombre REAL del scrape (:8889, exporter prometheus con namespace otel): otel_http_server_duration_milliseconds_count; el servicio viaja en la label exported_job: el exporter prometheus mapea service.name a job, y el scrape de Prometheus (job_name otel-collector) colisiona con esa label expuesta y la renombra a exported_job/exported_instance (verificado en vivo, docs/evidence/05-dashboards-local.md).",
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": []
+      },
       "targets": [
         {
-          "datasource": "Prometheus",
-          "expr": "sum(rate(http_requests_total[1m])) by (service_name)",
-          "legendFormat": "{{service_name}}"
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (exported_job) (rate(otel_http_server_duration_milliseconds_count{exported_job=~\"$service\"}[5m]))",
+          "legendFormat": "{{exported_job}}"
         }
       ]
     },
     {
       "id": 2,
-      "title": "Latencia P95 (ms)",
+      "title": "Error rate (ratio 5xx)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "description": "SLI 2 (PLAN 3.C). Query base del PLAN con http_response_status_code=~\"5..\"; la label REAL en el scrape (semconv 1.11 del FastAPI instrumentation) es http_status_code. Ratio 5xx sobre el total; umbral SLO visibilidad 1%/5%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(otel_http_server_duration_milliseconds_count{exported_job=~\"$service\",http_status_code=~\"5..\"}[5m])) / sum(rate(otel_http_server_duration_milliseconds_count{exported_job=~\"$service\"}[5m]))",
+          "legendFormat": "5xx ratio $service"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Latency p99 end-to-end",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "description": "SLI 3 (PLAN 3.C): p99 servidor + overlay de la latencia medida por la traza. Overlay implementado con el histograma del hop service-a->service-b que el propio SDK instrumenta dentro de la traza (otel_http_client_duration_milliseconds): es la latencia de la ruta tal como la mide el trazado. El click sobre un exemplar abre la traza (data link Tempo, mecanismo 3.B; en el modo local el waterfall vive en Jaeger).",
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
             "exemplar": true,
             "links": [
               {
                 "title": "Traza de ${__field.labels.service_name} (Tempo)",
                 "url": "explore?left={\"datasource\":\"tempo\",\"queries\":[{\"refId\":\"A\",\"queryType\":\"traceql\",\"query\":\"{resource.service.name=\\\"${__field.labels.service_name}\\\"}\"}],\"range\":{\"from\":\"now-1h\",\"to\":\"now\"}}",
+                "internal": true
+              },
+              {
+                "title": "Traza de $service (Jaeger local)",
+                "url": "explore?left={\"datasource\":\"jaeger\",\"queries\":[{\"refId\":\"A\",\"service\":\"$service\",\"tags\":{}}],\"range\":{\"from\":\"now-1h\",\"to\":\"now\"}}",
                 "internal": true
               }
             ]
@@ -77,9 +123,126 @@
       },
       "targets": [
         {
-          "datasource": "Prometheus",
-          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, service_name)) * 1000",
-          "legendFormat": "{{service_name}} - P95"
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(otel_http_server_duration_milliseconds_bucket{exported_job=~\"$service\"}[5m])))",
+          "legendFormat": "p99 servidor $service"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(otel_http_client_duration_milliseconds_bucket{exported_job=~\"$service\"}[5m])))",
+          "legendFormat": "p99 hop de traza (cliente)"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Latencia p95 de dependencia DB",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "description": "SLI 4 (PLAN 3.C). Query base del PLAN: db_client_operation_duration_bucket. DESVIACION (verificada en el scrape real :8889): la instrumentacion SQLAlchemy 0.66b1 (schema 1.11) NO emite db_client_operation_duration; solo emite otel_db_client_connections_usage. Proxy real elegido: la p95 del endpoint de service-b que ES la dependencia DB (/inventory/reserve), mismo histograma otel_http_server_duration_milliseconds. Fija a exported_job=service-b por contrato, no sigue la variable service.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "exemplar": true,
+            "links": [
+              {
+                "title": "Traza de ${__field.labels.service_name} (Tempo)",
+                "url": "explore?left={\"datasource\":\"tempo\",\"queries\":[{\"refId\":\"A\",\"queryType\":\"traceql\",\"query\":\"{resource.service.name=\\\"${__field.labels.service_name}\\\"}\"}],\"range\":{\"from\":\"now-1h\",\"to\":\"now\"}}",
+                "internal": true
+              },
+              {
+                "title": "Traza de service-b (Jaeger local)",
+                "url": "explore?left={\"datasource\":\"jaeger\",\"queries\":[{\"refId\":\"A\",\"service\":\"service-b\",\"tags\":{}}],\"range\":{\"from\":\"now-1h\",\"to\":\"now\"}}",
+                "internal": true
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(otel_http_server_duration_milliseconds_bucket{exported_job=\"service-b\",http_target=\"/inventory/reserve\"}[5m])))",
+          "legendFormat": "p95 service-b /inventory/reserve (proxy DB)"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "CPU del host y de los contenedores",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "description": "Overhead (PLAN 3.C). Query base del PLAN: system_cpu_utilization / process_cpu_utilization (hostmetrics). DESVIACION (verificada en el scrape real): contrib 0.162 ya no emite *_utilization; el scraper de cpu emite system.cpu_time (otel_system_cpu_time_seconds_total por state) y la utilization se deriva como 1 - idle/total. Contenedores: el pipeline local solo ve el proceso del collector (otel_otelcol_process_cpu_seconds_total); el hostmetrics receiver estaba declarado pero NO cableado al pipeline de metricas y se ha anadido para alimentar este panel.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1 - sum(rate(otel_system_cpu_time_seconds_total{state=\"idle\"}[5m])) / sum(rate(otel_system_cpu_time_seconds_total[5m]))",
+          "legendFormat": "host CPU (todos los cores)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(otel_otelcol_process_cpu_seconds_total[5m])",
+          "legendFormat": "collector (fraccion de 1 core)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Errores del OTel Collector",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "description": "Overhead (PLAN 3.C): salud del collector desde su autotelemetria (scrape :8888 reexportado en :8889). Query base del PLAN: otelcol_exporter_send_failed_spans, otelcol_exporter_queue_size, otelcol_receiver_refused_spans, otelcol_process_uptime. DESVIACION (verificada en el scrape real): contrib 0.162 no registra exporter_send_failed_spans; el equivalente vivo es receiver_failed_spans (+refused). Nombres reales con prefijo otel_ y sufijo _total en los counters.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (exporter) (otel_otelcol_exporter_queue_size)",
+          "legendFormat": "queue {{exporter}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(otel_otelcol_receiver_refused_spans_total[5m]))",
+          "legendFormat": "refused spans/s"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(otel_otelcol_receiver_failed_spans_total[5m]))",
+          "legendFormat": "failed spans/s (reemplazo de send_failed en 0.162)"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "otel_otelcol_process_uptime_total",
+          "legendFormat": "uptime (s)"
         }
       ]
     }

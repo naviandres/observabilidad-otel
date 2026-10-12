@@ -64,6 +64,42 @@ Ambos ficheros viven en `deploy/`, comparten proyecto y red por defecto, y se
 resuelven por nombre de servicio (`otel-collector:4317`, `prometheus:9090`,
 `jaeger:16686`).
 
+## Dashboards SLO (provisioning por codigo, nunca a mano)
+
+Tres artefactos versionados en `dashboards/`, uno por backend:
+
+| Archivo | Backend | Contenido |
+|---|---|---|
+| `grafana-slo.json` | Grafana OSS local (uid `otel-lab-slo`) | los 6 paneles de PLAN 3.C leidos TODOS de Prometheus con los nombres REALES del scrape (`otel_http_server_duration_milliseconds_*`, `exported_job`, hostmetrics, autotelemetria del collector); variables `service`/`env` y data links de exemplar a Tempo (cloud) y Jaeger (local) |
+| `cloudwatch-slo.json` | CloudWatch (AWS, nativo) | maximo 3 widgets sobre los unicos contadores que existen alli (EMF `OtelLab`); sin CPUUtilization porque el cloudwatch-agent del task murio exit 1 y ContainerInsights es de pago — sustituido por salud de dependencia, documentado en el `comment` del JSON |
+| `cloud-monitoring-gcp.json` | Cloud Monitoring (GCP, nativo) | los 6 equivalentes GCP (Managed Prometheus/contadores), provisionado por su IaC |
+
+**Local**: al levantar el stack, el provider de Grafana
+(`deploy/grafana/provisioning/dashboards/dashboards.yml`, path
+`/var/lib/grafana/dashboards` montado desde `dashboards/`) aplica el JSON en
+calor. No hay importacion manual. Verificacion en vivo y las queries
+reales: `docs/evidence/05-dashboards-local.md`.
+
+```powershell
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observability.yml up -d
+# 30 s despues, el tablero ya esta servido:
+curl -u admin:admin http://localhost:3000/api/dashboards/uid/otel-lab-slo
+```
+
+**AWS (mini-sesion, coste ~$0 — dashboard y alarmas no facturan computo)**:
+
+```bash
+make aws-dashboard   # aws cloudwatch put-dashboard --dashboard-name otel-lab-slo (idempotente)
+make aws-alarms      # 2 put-metric-alarm desde dashboards/cloudwatch-alarms.json (idempotente)
+```
+
+Las alarmas (`otel-lab-error-ratio`: ratio EMF failed/created > 5 %;
+`otel-lab-db-degradation`: errores de DB > 5/5 min como aproximacion de la
+p99 con las metricas EMF disponibles) quedan SIN acciones SNS: la notificacion
+es deuda del guardrail de coste del proximo ciclo. Grafana NUNCA consulta CloudWatch
+(GetMetricData se cobra siempre, R-05): el dashboard de 6 paneles vive en
+Prometheus y el de CloudWatch es el complemento nativo de 3 widgets.
+
 ## Imágenes (tags fijados, sin `:latest`)
 
 | Servicio | Imagen |
