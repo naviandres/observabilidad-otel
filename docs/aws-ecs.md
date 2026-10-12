@@ -195,18 +195,31 @@ Sustituto real — `scripts/access.ps1` (targets `aws-access-grant` /
    `otel-lab-temp-session`. Imprime la IP pública del ENI de la task leída de
    `ec2 describe-network-interfaces → Association.PublicIp` (el ENI se resuelve
    desde los details de la task con la clave real `.Value`, mayúscula) y
-   persiste los `SecurityGroupRuleId` creados en un archivo de sesión
-   (`$env:TEMP\otel-lab-sg-rules-<sg>.txt`) para que Revoke los use.
+   persiste en un archivo de sesión (`$env:TEMP\otel-lab-sg-session-<sg>.txt`)
+   la IP del operador, los puertos y los `SecurityGroupRuleId` que trae la
+   **propia respuesta** de `authorize-security-group-ingress` (nombres reales
+   del alambre Query: `securityGroupRuleSet[].securityGroupRuleId`; el script
+   los extrae con el patrón `sgr-<hex>`, robusto al naming).
 2. **Verificación**: `make aws-verify` corre el framework `--include-aws`
    contra `http://<IP_TASK>:8000` con `--prometheus-url http://<IP_TASK>:8889/metrics`.
-3. **Revoke**: revoca **por `--security-group-rule-ids`** (los ids persistidos
-   por Grant + discovery en vivo con `ec2 describe-security-group-rules`,
-   prefiltrando `egress=false` + `description=otel-lab-temp-session`); después
-   **verifica** con `describe-security-groups` que el SG muestra `IpPermissions`
-   **[]** (0 ingress; si no, sale con error). Nota (bug corregido en ronda 3):
-   la description NO vive a nivel de `IpPermissions` sino dentro de `IpRanges[]`,
-   así que filtrar `IpPermissions[?Description==…]` nunca coincidía y la /32
-   sobrevivia a la sesión. El steady-state R-10/§3.2 queda garantizado por la
+3. **Revoke**: revoca de forma **determinista y simétrica al grant** con
+   `ec2 revoke-security-group-ingress --group-id <SG> --ip-permissions`
+   (`IpProtocol=tcp,FromPort/ToPort=<puerto>,IpRanges=[{CidrIp=<IP>/32}]`; las
+   claves de matching son protocolo/puerto/CIDR — la description NO participa).
+   La IP se lee **siempre** del archivo de sesión de Grant; si no hay archivo se
+   recalcula con aviso de posible divergencia. Si el archivo guarda
+   `SecurityGroupRuleId`s se intenta además el revoke por
+   `--security-group-rule-ids` (optimización de mejor esfuerzo: un fallo se
+   tolera porque el camino garantizado es el `--ip-permissions`; el
+   `InvalidPermission.NotFound` se trata como "nada que revocar"). Después
+   **verifica** con `describe-security-groups` que el SG muestra
+   `IpPermissions` **[]** (0 ingress; si queda cualquier regla la imprime y
+   sale con error, R-10). Notas (bugs corregidos en rondas 3-4): filtrar
+   `IpPermissions[?Description==…]` nunca coincidía porque la description vive
+   en `IpRanges[]`, y el discovery por `describe-security-group-rules` quedó
+   descartado — esa llamada no acepta `--group-ids` y la API rechaza los
+   filtros `egress`/`description` (`InvalidParameterValue`, verificado en vivo
+   por el revisor). El steady-state R-10/§3.2 queda garantizado por la
    verificación post-revoke. La regla vive **solo durante la sesión**; olvidar
    el revoke deja exposición puntual del /32 del operador, no de 0.0.0.0/0.
 

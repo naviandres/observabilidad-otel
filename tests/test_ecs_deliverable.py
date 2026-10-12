@@ -272,13 +272,30 @@ def test_access_helper_replaces_broken_tunnel():
     assert "DESVIACION" in text.upper(), "access.ps1 debe imprimir la desviacion del PLAN"
     assert "AWS-StartPortForwardingSessionForRemoteSession" not in text
     assert "AWS-StartPortForwardingSessionForECS" not in text
-    # Ronda 3 (review D1): revoke por SecurityGroupRuleId (forma estable),
-    # NO filtrando Description a nivel de IpPermissions (vive en IpRanges[])
+    # Ronda 4 (review N1): revoke DETERMINISTA y SIMETRICO al grant via
+    # --ip-permissions; los rule-ids persistidos por Grant (respuesta de
+    # authorize) son SOLO una optimizacion via --security-group-rule-ids.
+    # Prohibido describe-security-group-rules: la opcion --group-ids no existe
+    # en esa llamada y los filtros egress/description los rechaza la API
+    # (InvalidParameterValue verificado en vivo, review ronda 3).
     assert "--security-group-rule-ids" in text
-    assert "describe-security-group-rules" in text
+    assert '"describe-security-group-rules"' not in text
+    assert "Get-TempRuleIds" not in text
+    assert re.search(
+        r"revoke-security-group-ingress.*--ip-permissions", text, re.S
+    ), "Revoke debe revocar por ip-permissions simetrico al grant"
     assert "SecurityGroups[0].IpPermissions[?Description" not in text
-    # Ronda 3 (review D1): verificacion post-revoke alcanzable (esperado 0)
-    assert "length(SecurityGroups[0].IpPermissions)" in text
+    # La descripcion NO es clave de matching en revoke: el ip-permissions
+    # simetrico lleva solo CidrIp (IpRanges).
+    assert not re.search(r"CidrIp.*Description", text[text.index("Revoke -"):], re.S)
+    # Ronda 4: verificacion post-revoke (R-10): IpPermissions debe ser [] y
+    # exit 1 si queda cualquier regla.
+    assert '"SecurityGroups[0].IpPermissions"' in text
+    assert "length(SecurityGroups[0].IpPermissions)" not in text
+    # Ronda 4: file:// en Windows NO puede ser forma URI triple-slash
+    # (botocore recorta 7 chars -> "/C:/..." -> WinError 22, verificado en
+    # vivo con --dry-run 2026-10-12).
+    assert 'return "file:///"' not in text
     # Ronda 3 (review D2/D3): IP publica via Association.PublicIp y la clave
     # real del KeyValuePair de ECS es .Value (mayuscula), nunca .value
     assert "Association.PublicIp" in text

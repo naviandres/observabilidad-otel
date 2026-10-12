@@ -26,11 +26,22 @@
     (`ec2 describe-network-interfaces` -> Association.PublicIp), verificado
     en vivo 2026-10-12.
 .PARAMETER Action
-    Grant: anade la regla /32 y persiste los SecurityGroupRuleId creados
-    (archivo de sesion en $env:TEMP). Revoke: revoca por
-    --security-group-rule-ids (archivo de sesion + discovery en vivo via
-    describe-security-group-rules) y VERIFICA despues que el SG muestra
-    IpPermissions [] (0 ingress).
+    Grant: anade la regla /32, captura los SecurityGroupRuleId de la propia
+    respuesta de authorize-security-group-ingress (patron sgr-<hex> sobre el
+    texto crudo; los nombres reales del alambre Query son
+    securityGroupRuleSet[].securityGroupRuleId, verificado contra modelos
+    botocore) y persiste IP + puertos + rule-ids en un archivo de sesion en
+    $env:TEMP. Revoke: revoca de forma DETERMINISTA y
+    SIMETRICA al grant con revoke-security-group-ingress --ip-permissions
+    (IpProtocol/FromPort/ToPort/IpRanges=[{CidrIp=<ip>/32}]); la IP se lee
+    SIEMPRE del archivo de sesion de Grant (si falta, se recalcula y se avisa);
+    los rule-ids del archivo son SOLO una optimizacion (revoke por
+    --security-group-rule-ids si existen). Despues VERIFICA que el SG muestra
+    IpPermissions [] (0 ingress, R-10) y sale con error si quedan reglas.
+    NO hay discovery por la llamada describe-security-group-rules: no acepta
+    --group-ids y los filtros server-side de direccion y description los
+    rechaza la API (InvalidParameterValue, verificado en vivo por el revisor,
+    ronda 3).
 .PARAMETER Region
     Region AWS (default: us-east-1).
 .PARAMETER Profile
@@ -114,10 +125,13 @@ function Get-OperatorIpv4 {
 function Write-JsonArgFile {
     param([string]$Json)
     # El CLI acepta estructuras via file:// (evita el quote-mangling de los
-    # argumentos nativos en Windows PowerShell 5.1).
+    # argumentos nativos en Windows PowerShell 5.1). OJO: botocore recorta
+    # "file://" (7 chars) y usa el resto como ruta LITERAL; la forma URI
+    # "file:///C:/..." produce "/C:/..." -> WinError 22 (verificado en vivo
+    # 2026-10-12 con --dry-run). En Windows se pasa "file://C:/...".
     $path = Join-Path $env:TEMP ("otel-lab-sg-" + [guid]::NewGuid().ToString("N") + ".json")
     Set-Content -Path $path -Value $Json -Encoding ascii -NoNewline
-    return "file:///" + ($path -replace '\\', '/')
+    return "file://" + ($path -replace '\\', '/')
 }
 
 function ConvertTo-JsonArray {
@@ -150,34 +164,23 @@ function Get-TaskPublicIp {
     return $ip
 }
 
-function Get-RuleSessionFile {
+function Get-SessionFilePath {
     param([string]$SgId)
-    Join-Path $env:TEMP ("otel-lab-sg-rules-" + $SgId + ".txt")
+    Join-Path $env:TEMP ("otel-lab-sg-session-" + $SgId + ".txt")
 }
 
-function Get-TempRuleIds {
-    # describe-security-group-rules es la forma ESTABLE: cada regla expone
-    # SecurityGroupRuleId, Description y CidrIpv4 a nivel de la regla. La
-    # descripcion NO vive a nivel de IpPermissions en describe-security-groups
-    # (vive dentro de IpRanges[]), por eso el viejo filtro
-    # IpPermissions[?Description==...] nunca coincidia (bug D1, review ronda 2).
-    param([string]$SgId, [string]$Cidr = "")
-    $query = if ($Cidr) {
-        "SecurityGroupRules[?CidrIpv4=='$Cidr'].SecurityGroupRuleId"
-    } else {
-        "SecurityGroupRules[?ends_with(CidrIpv4, '/32')].SecurityGroupRuleId"
-    }
-    for ($i = 0; $i -lt 5; $i++) {
-        $out = Invoke-Aws @(
-            "ec2", "describe-security-group-rules", "--group-ids", $SgId,
-            "--filters", "Name=egress,Values=false", "Name=description,Values=$Marker",
-            "--query", $query, "--output", "text"
-        )
-        $ids = @($out -split '\s+' | Where-Object { $_ -match '^sgr-[0-9a-f]+$' })
-        if ($ids.Count -gt 0) { return $ids }
-        Start-Sleep -Seconds 2
-    }
-    return @()
+function Invoke-AwsBestEffort {
+    # Para llamadas cuyo fallo debe inspeccionarse (revoke tolera
+    # InvalidPermission.NotFound). En PS 5.1, stderr de un comando nativo con
+    # ErrorActionPreference=Stop puede abortar al redirigir 2>&1: se relaja
+    # temporalmente y se devuelve codigo + texto capturado.
+    param([string[]]$AwsArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $out = & aws --region $Region --profile $Profile @AwsArgs 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    return [pscustomobject]@{ Code = $code; Text = $out.Trim() }
 }
 
 $sgId = Get-SecurityGroupId
@@ -197,17 +200,35 @@ if ($Action -eq "Grant") {
         }
     )
     $fileArg = Write-JsonArgFile -Json (ConvertTo-JsonArray $permissions)
-    Invoke-Aws @("ec2", "authorize-security-group-ingress", "--group-id", $sgId, "--ip-permissions", $fileArg) | Out-Null
-    Remove-Item ($fileArg -replace '^file:///', '') -ErrorAction SilentlyContinue
+    $resp = Invoke-Aws @("ec2", "authorize-security-group-ingress", "--group-id", $sgId, "--ip-permissions", $fileArg)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "[access] authorize-security-group-ingress fallo (exit $LASTEXITCODE): $($resp -join ' ')"
+        exit 1
+    }
+    Remove-Item ($fileArg -replace '^file://', '') -ErrorAction SilentlyContinue
     Write-Host "[access] regla TEMPORAL aplicada (description=$Marker)." -ForegroundColor Green
-    # Persistir los SecurityGroupRuleId creados: Revoke los usa como contrato
-    # estable (la description no es filtrable a nivel de IpPermissions).
-    $grantIds = Get-TempRuleIds -SgId $sgId -Cidr "$ip/32"
+    # Persistir IP + puertos + los SecurityGroupRuleId de la PROPIA respuesta de
+    # authorize. NO se descubren con la llamada describe-security-group-rules:
+    # no acepta --group-ids y rechaza los filtros server-side de direccion y
+    # description (InvalidParameterValue verificado en vivo, review ronda 3 ->
+    # bug D1/N1).
+    # Extraccion por patron 'sgr-<hex>' sobre el texto crudo: robusta ante los
+    # nombres reales del alambre Query (securityGroupRuleSet[].securityGroupRuleId,
+    # verificado contra los modelos botocore de aws-cli 2.32.31).
+    $grantIds = @()
+    try {
+        $ruleRe = [regex]'sgr-[0-9a-f]+'
+        $grantIds = @($ruleRe.Matches(($resp -join "")) |
+            ForEach-Object { $_.Value } | Select-Object -Unique)
+    } catch {
+        Write-Host "[access] AVISO: no se pudo leer la respuesta de authorize; Revoke usara ip-permissions simetrico igualmente." -ForegroundColor Yellow
+    }
+    $sessionLines = @("ip=$ip") + @($Ports | ForEach-Object { "port=$_" }) + @($grantIds | ForEach-Object { "rule=$_" })
+    Set-Content -Path (Get-SessionFilePath -SgId $sgId) -Value $sessionLines -Encoding ascii
     if ($grantIds.Count -gt 0) {
-        Set-Content -Path (Get-RuleSessionFile -SgId $sgId) -Value $grantIds -Encoding ascii
-        Write-Host "[access] rule-ids persistidos para Revoke: $($grantIds -join ' ')" -ForegroundColor Cyan
+        Write-Host "[access] sesion persistida (ip=$ip, rule-ids: $($grantIds -join ' '))." -ForegroundColor Cyan
     } else {
-        Write-Host "[access] AVISO: no se descubrieron rule-ids; Revoke usara discovery en vivo." -ForegroundColor Yellow
+        Write-Host "[access] sesion persistida (ip=$ip); sin rule-ids en la respuesta: Revoke ira por ip-permissions simetrico." -ForegroundColor Yellow
     }
     try {
         $taskIp = Get-TaskPublicIp
@@ -225,36 +246,87 @@ if ($Action -eq "Grant") {
 }
 
 # --- Revoke ---------------------------------------------------------------
-Write-Host "[access] revocando reglas /32 temporales (description=$Marker) del SG $sgId..." -ForegroundColor Cyan
-# Revocar por SecurityGroupRuleId (forma estable del CLI): los ids persistidos
-# por GRANT en el archivo de sesion + discovery en vivo por
-# describe-security-group-rules. NO se filtra IpPermissions[?Description==...]:
-# la description vive dentro de IpRanges[] y ese filtro nunca coincidia
-# (bug D1, review ronda 2: la regla /32 sobrevivia a la sesion -> R-10 roto).
-$sessionFile = Get-RuleSessionFile -SgId $sgId
+# Revocacion DETERMINISTA, sin discovery: la forma clasica de
+# revoke-security-group-ingress --ip-permissions es SIMETRICA al grant
+# (el matching es por protocolo/puerto/CidrIp; la description no participa).
+# La IP se lee SIEMPRE del archivo de sesion de Grant; si no hay archivo se
+# recalcula y se avisa de que podria diferir de la del grant. Los
+# SecurityGroupRuleId persistidos por Grant se usan SOLO como optimizacion.
+Write-Host "[access] revocando reglas /32 temporales del SG $sgId..." -ForegroundColor Cyan
+$sessionFile = Get-SessionFilePath -SgId $sgId
+$ipFromFile = ""
+$revokePorts = @($Ports)
 $ruleIds = @()
 if (Test-Path $sessionFile) {
-    $ruleIds += @(Get-Content $sessionFile | ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -match '^sgr-[0-9a-f]+$' })
+    $portsFromFile = @()
+    foreach ($line in @(Get-Content $sessionFile)) {
+        if ($line -match '^ip=(.+)$') { $ipFromFile = $Matches[1].Trim() }
+        elseif ($line -match '^port=(\d+)$') { $portsFromFile += [int]$Matches[1] }
+        elseif ($line -match '^rule=(sgr-[0-9a-f]+)$') { $ruleIds += $Matches[1] }
+    }
+    if ($portsFromFile.Count -gt 0) { $revokePorts = $portsFromFile }
 }
-$ruleIds += @(Get-TempRuleIds -SgId $sgId)
-$ruleIds = @($ruleIds | Select-Object -Unique)
-if ($ruleIds.Count -gt 0) {
-    $revokeArgs = @("ec2", "revoke-security-group-ingress", "--security-group-rule-ids") + $ruleIds
-    Invoke-Aws $revokeArgs | Out-Null
-    Write-Host "[access] revocado por rule-id: $($ruleIds -join ' ')" -ForegroundColor Green
+if ($ipFromFile) {
+    if ($OperatorIp -and ($OperatorIp.Trim() -ne $ipFromFile)) {
+        Write-Host "[access] AVISO: -OperatorIp ($OperatorIp) difiere de la sesion de Grant ($ipFromFile); se usa la del archivo." -ForegroundColor Yellow
+    }
+    $revokeIp = $ipFromFile
 } else {
-    Write-Host "[access] no queda ninguna regla temporal propia que revocar." -ForegroundColor Green
+    Write-Host "[access] AVISO: no hay archivo de sesion de Grant; recalculando IPv4 (podria diferir de la del grant si cambio tu IP)." -ForegroundColor Yellow
+    $revokeIp = Get-OperatorIpv4 -Override $OperatorIp
+}
+# Optimizacion (mejor esfuerzo): revocar por rule-id si Grant los persistio.
+if ($ruleIds.Count -gt 0) {
+    $ruleIdArgs = @("ec2", "revoke-security-group-ingress", "--security-group-rule-ids") + @($ruleIds)
+    $r = Invoke-AwsBestEffort $ruleIdArgs
+    if ($r.Code -ne 0) {
+        Write-Host "[access] rule-ids no revocados (continua por ip-permissions): $($r.Text)" -ForegroundColor Yellow
+    } else {
+        Write-Host "[access] revocado por rule-id: $($ruleIds -join ' ')" -ForegroundColor Green
+    }
+}
+# Camino garantizado: ip-permissions simetrico al grant, puerto a puerto.
+foreach ($port in $revokePorts) {
+    $perm = @(
+        @{
+            IpProtocol = "tcp"
+            FromPort   = $port
+            ToPort     = $port
+            IpRanges   = @(@{ CidrIp = "$revokeIp/32" })
+        }
+    )
+    $fileArg = Write-JsonArgFile -Json (ConvertTo-JsonArray $perm)
+    $r = Invoke-AwsBestEffort @(
+        "ec2", "revoke-security-group-ingress", "--group-id", $sgId,
+        "--ip-permissions", $fileArg
+    )
+    Remove-Item ($fileArg -replace '^file://', '') -ErrorAction SilentlyContinue
+    if ($r.Code -ne 0) {
+        if ($r.Text -match 'InvalidPermission\.NotFound') {
+            Write-Host "[access] no existia regla para $revokeIp/32 en el puerto $port (nada que revocar)." -ForegroundColor Green
+        } else {
+            Write-Error "[access] revoke-security-group-ingress fallo en el puerto $port (exit $($r.Code)): $($r.Text)"
+            exit 1
+        }
+    } else {
+        Write-Host "[access] revocado ip-permissions: tcp/$port desde $revokeIp/32." -ForegroundColor Green
+    }
 }
 Remove-Item $sessionFile -ErrorAction SilentlyContinue
-# Verificacion post-revoke: describe-security-groups debe mostrar IpPermissions []
+# Verificacion post-revoke (R-10): describe-security-groups debe mostrar
+# IpPermissions [] (steady-state sin ingress); exit 1 si queda cualquier regla.
 $left = Invoke-Aws @(
     "ec2", "describe-security-groups", "--group-ids", $sgId,
-    "--query", 'length(SecurityGroups[0].IpPermissions)', "--output", "text"
+    "--query", "SecurityGroups[0].IpPermissions", "--output", "json"
 )
-if ($left -ne "0") {
-    Write-Host "[access] ERROR: quedan $left regla(s) de ingress en $sgId (esperado 0)." -ForegroundColor Red
-    exit 1
+$leftText = ($left -join "").Trim()
+if (-not $leftText -or $leftText -eq "[]") {
+    Write-Host "[access] revocado y VERIFICADO: IpPermissions = [] (0 ingress, R-10 intacto)." -ForegroundColor Green
+    exit 0
 }
-Write-Host "[access] revocado y VERIFICADO: IpPermissions = [] (0 ingress, R-10 intacto)." -ForegroundColor Green
-exit 0
+if ($leftText -match [regex]::Escape("$revokeIp/32")) {
+    Write-Host "[access] ERROR: la /32 del operador PERSISTE en ${sgId}: $leftText" -ForegroundColor Red
+} else {
+    Write-Host "[access] ERROR: quedan ingress no esperadas en $sgId (steady-state esperado []): $leftText" -ForegroundColor Red
+}
+exit 1
