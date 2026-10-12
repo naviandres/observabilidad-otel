@@ -96,7 +96,7 @@ def test_generate_traceparent_is_unique_per_call(vc):
 def test_required_failures_ignores_skip_and_pass(vc):
     report = vc.CorrelationReport()
     report.register(1, vc.PASS)
-    report.register(3, vc.SKIP, razon=vc.AWS_CORRELATION_SKIP_REASON)
+    report.register(3, vc.SKIP, razon=vc.AWS_SKIP_REASON)
     report.register(10, vc.SKIP, razon=vc.GCP_SKIP_REASON)
     assert report.required_failures == []
     report.register(12, vc.FAIL, razon="cero incremento")
@@ -119,14 +119,14 @@ def test_local_mode_exits_zero_with_expected_skips(vc, monkeypatch, tmp_path):
     for assertion_id in range(3, 10):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
-        assert row["razon"] == "la verificación del lado AWS (despliegue AWS aun no disponible)"
+        assert row["razon"] == "AWS no incluido (ejecutar con --include-aws)"
     for assertion_id in (10, 11, 12):
         row = _assertion(payload, assertion_id)
         assert row["estado"] == "SKIP"
         assert "--include-gcp" in row["razon"]
     row13 = _assertion(payload, 13)
     assert row13["estado"] == "SKIP"
-    assert row13["razon"] == "despliegue AWS no disponible (cuenta en sandbox)"
+    assert "--include-aws" in row13["razon"] and "--include-gcp" in row13["razon"]
 
 
 def test_evidence_json_schema_and_markdown_mirror(vc, monkeypatch, tmp_path):
@@ -539,19 +539,50 @@ def test_gcloud_token_missing_binary_raises_auth_error(vc, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A13 cross-cloud gate
+# A13 cross-cloud gate + honest AWS-side degradation
 # ---------------------------------------------------------------------------
 
 
-def test_include_aws_without_cli_data_skips(vc, monkeypatch, tmp_path):
-    def no_cli(cmd, capture_output, text, timeout, check):
-        raise OSError("aws not found")
+def test_include_aws_without_gcp_skips_cross_cloud(vc, monkeypatch, tmp_path):
+    """--include-aws alone: A3-A9 FAIL honestly (no boto3) and A13 SKIPs."""
 
-    monkeypatch.setattr(vc.subprocess, "run", no_cli)
+    def no_boto3(service, profile, region):
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(vc, "make_aws_client", no_boto3)
     rc, json_path = _run_main(
         vc, monkeypatch, _echoing_http_request(vc), tmp_path, extra_args=["--include-aws"]
     )
-    assert rc == 0
+    payload = _read_payload(json_path)
+    assert rc == 1  # required AWS assertions failed honestly
+    for assertion_id in range(3, 10):
+        row = _assertion(payload, assertion_id)
+        assert row["estado"] == "FAIL"
+        assert "boto3" in row["razon"]
+    row13 = _assertion(payload, 13)
+    assert row13["estado"] == "SKIP"
+    assert "--include-gcp" in row13["razon"]
+
+
+def test_both_flags_without_boto3_fails_cross_cloud(vc, monkeypatch, tmp_path):
+    """With both flags but no boto3 the AWS side is not evaluable: A13 FAILs."""
+
+    def no_boto3(service, profile, region):
+        raise ImportError("No module named 'boto3'")
+
+    monkeypatch.setattr(vc, "make_aws_client", no_boto3)
+    monkeypatch.setattr(vc, "gcloud_access_token", lambda project, timeout=30.0: "fake-token")
+    transport = _gcp_transport(
+        trace_spans=[_span("order.process", "service-a"), _span("inventory.query", "service-b")],
+        log_entries=[_log_entry("service-a"), _log_entry("service-b")],
+        metric_types=["prometheus.googleapis.com/orders_created_total/counter"],
+        series=[_counter_series([1])],
+    )
+    rc, json_path = _run_main(
+        vc, monkeypatch, transport, tmp_path,
+        extra_args=["--include-aws", "--include-gcp"],
+    )
+    assert rc == 1
     row = _assertion(_read_payload(json_path), 13)
-    assert row["estado"] == "SKIP"
-    assert "despliegue AWS no disponible" in row["razon"]
+    assert row["estado"] == "FAIL"
+    assert "lado AWS no evaluable" in row["razon"]

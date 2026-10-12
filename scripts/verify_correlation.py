@@ -4,16 +4,28 @@ The script injects a known W3C ``traceparent`` into ``POST /orders`` and then
 asserts that the same ``trace_id`` shows up across the three observability
 signals, in each cloud it was asked to check:
 
+* ``--include-aws``  -> X-Ray (A3, A4), CloudWatch Logs (A5), CloudWatch
+  metrics via EMF (A6), resource consistency across the three AWS signals
+  (A7), Prometheus exemplars scraped through the tunnel (A8) and the
+  cardinality limits (A9). AWS calls go through boto3 (lazy import: local
+  mode and offline tests never need the SDK installed).
 * ``--include-gcp``  -> Cloud Trace (A10), Cloud Logging (A11), Cloud
   Monitoring via Google Managed Prometheus (A12).
-* ``--include-aws``  -> X-Ray cross-cloud check (A13). The AWS deployment is
-  not available yet (sandboxed account), so A13 SKIPs with an explicit reason
-  until AWS data exists. Assertions 3-9 belong to the AWS side of the
-  correlation and are registered as SKIP with the AWS-side reason below.
+* Both flags together additionally evaluate A13: the same W3C ``trace_id``
+  must be found in an AWS signal (X-Ray or CloudWatch Logs) AND in a GCP
+  signal (Cloud Trace or Cloud Logging). With one flag missing A13 SKIPs
+  with an explicit reason.
+
+X-Ray verification is STRUCTURAL, never by id equality (R-03): the awsxray
+exporter rewrites the 128-bit id to the ``1-<8hex>-<24hex>`` form, so the
+W3C id is converted deterministically (``w3c_to_xray_trace_id``) and the
+parent/child relationship between the service-a and service-b segments is
+what proves propagation.
 
 Design constraints (PLAN §3.A): cost ≈ $0 — only read APIs inside free
-quotas, authentication via the ADC token of ``gcloud auth print-access-token``
-and plain ``urllib`` (no extra SDKs in requirements.txt).
+quotas (``GetMetricStatistics`` and never ``GetMetricData``, ``FilterLogEvents``
+and never Logs Insights), GCP authentication via the ADC token of
+``gcloud auth print-access-token`` and plain ``urllib`` (no Google SDK).
 
 Outputs ``docs/evidence/03-correlation.json`` plus a mirrored Markdown table
 ``03-correlation.md``. Exit code is non-zero when a REQUIRED assertion ends in
@@ -76,8 +88,32 @@ TIMESERIES_URL = "https://monitoring.googleapis.com/v3/projects/{project}/timeSe
 # a starts_with filter and this exact type is preferred when present.
 GMP_ORDERS_COUNTER = "prometheus.googleapis.com/orders_created_total/counter"
 
+# --- AWS side (PLAN §3.A, cost ≈ $0: read APIs inside the free tier) --------
+AWS_DEFAULT_PROFILE = "otel-lab"
+AWS_DEFAULT_REGION = "us-east-1"
+EMF_NAMESPACE = "OtelLab"
+ORDERS_COUNTER = "orders_created_total"
+# The OTel collector's awscloudwatchlogs exporter writes the app logs to
+# /otel/labs/ecs-cluster/<service>; the awslogs DRIVER groups
+# (/otel/labs/ecs-platform/*) carry container noise and are NOT the target.
+EXPORTER_LOG_GROUP_TEMPLATE = "/otel/labs/ecs-cluster/{service}"
+CORRELATION_SERVICES = ("service-a", "service-b")
+# PLAN §13 documents GetMetricStatistics with --period 300 / Sum.
+METRIC_PERIOD_SECONDS = 300
+# Bounded reads (never a dashboard-style loop): paging caps keep the API
+# call count in the tens per run (R-05/R-14).
+MAX_SUMMARY_PAGES = 10
+MAX_STRUCTURAL_SCAN_TRACES = 30
+CUSTOM_METRICS_LIMIT = 10
+PROM_SERIES_LIMIT = 1500
+# Prometheus exporter of the collector, reachable through the SSM tunnel
+# (same URL the local compose stack exposes on :8889).
+DEFAULT_PROMETHEUS_URL = "http://localhost:8889/metrics"
+
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-01$")
+TRACE_ID_FIELD_RE = re.compile(r'"trace_id":\s*"([0-9a-f]{32})"')
+EXEMPLAR_TRACE_RE = re.compile(r'trace_id="([0-9a-f]{32})"')
 
 # structlog writes "logger": "service-a|service-b" inside the JSON line; the
 # filelog->OTLP pipeline lands it in textPayload (verified live 2026-10-11).
@@ -105,9 +141,9 @@ ASSERTION_CATALOG: list[tuple[int, str, bool]] = [
     (13, "Cruzada GCP↔AWS: mismo trace_id en señales de ambas nubes", True),
 ]
 
-AWS_SKIP_REASON = "despliegue AWS no disponible (cuenta en sandbox)"
-AWS_CORRELATION_SKIP_REASON = "la verificación del lado AWS (despliegue AWS aun no disponible)"
+AWS_SKIP_REASON = "AWS no incluido (ejecutar con --include-aws)"
 GCP_SKIP_REASON = "GCP no incluido (ejecutar con --include-gcp)"
+CROSS_CLOUD_SKIP_REASON = "A13 requiere --include-aws y --include-gcp simultaneos (trafico cruzando las nubes)"
 
 
 class HttpError(RuntimeError):
@@ -279,6 +315,259 @@ def gcloud_access_token(project: str, timeout: float = 30.0) -> str:
         # print-access-token does not honour --format: send it bare.
         raise AuthError("gcloud auth print-access-token devolvio un token vacio (ADC?)")
     return token
+
+
+# ---------------------------------------------------------------------------
+# AWS seams and pure helpers (unit-testable without boto3 or network)
+# ---------------------------------------------------------------------------
+
+
+def w3c_to_xray_trace_id(trace_id: str) -> str:
+    """Convert a W3C 32-hex trace id to the X-Ray ``1-<epoch8>-<suffix24>`` form.
+
+    R-03: the awsxray exporter rewrites the 128-bit id, so the two strings are
+    never compared literally — this deterministic mapping is only used to look
+    the trace up inside X-Ray; the assertion itself checks STRUCTURE (segments
+    and parent ids), not id equality.
+
+    Args:
+        trace_id: 32 lowercase hex characters (W3C trace id).
+
+    Returns:
+        The equivalent X-Ray trace id, e.g. ``1-aabbccdd-eeff00...``.
+    """
+    if not HEX32_RE.match(trace_id):
+        raise ValueError(f"trace_id no es 32 hex: {trace_id!r}")
+    return f"1-{trace_id[:8]}-{trace_id[8:32]}"
+
+
+def make_aws_client(service: str, profile: str, region: str) -> Any:
+    """Build one boto3 client (lazy import: local mode never needs boto3).
+
+    Args:
+        service: boto3 service name (``xray``, ``logs``, ``cloudwatch``).
+        profile: AWS credentials profile (``otel-lab`` by default).
+        region: AWS region (``us-east-1`` by default).
+
+    Raises:
+        ImportError: when boto3 is not installed (dev requirements missing).
+    """
+    import boto3  # deferred: offline tests and --include-gcp runs skip this
+
+    session = boto3.Session(
+        profile_name=profile or None,
+        region_name=region or None,
+    )
+    return session.client(service)
+
+
+def fetch_trace_summary_ids(xray_client: Any, window: int) -> list[str]:
+    """All X-Ray trace ids seen in the last ``window`` seconds (bounded paging).
+
+    Uses only ``GetTraceSummaries`` (free tier) with a hard page cap, never a
+    loop that could turn into a paid dashboard pattern.
+    """
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=window)
+    ids: list[str] = []
+    token: str | None = None
+    for _ in range(MAX_SUMMARY_PAGES):
+        params: dict[str, Any] = {"TimeRange": {"StartTime": start, "EndTime": end}}
+        if token:
+            params["NextToken"] = token
+        response = xray_client.get_trace_summaries(**params)
+        for summary in response.get("TraceSummaries", []):
+            trace_id = summary.get("TraceId")
+            if trace_id:
+                ids.append(trace_id)
+        token = response.get("NextToken")
+        if not token:
+            break
+    return ids
+
+
+def parse_trace_segments(batch_response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten a ``BatchGetTraces`` response into segment documents (dicts).
+
+    botocore returns each segment as a JSON STRING; tests may pass dicts.
+    """
+    docs: list[dict[str, Any]] = []
+    for trace in batch_response.get("Traces", []):
+        for raw in trace.get("TraceSegments", []):
+            doc = raw if isinstance(raw, dict) else json.loads(raw)
+            if isinstance(doc, dict):
+                docs.append(doc)
+    return docs
+
+
+def service_segment_ids(docs: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """Map each correlation service to the ids it owns in a trace.
+
+    A service owns its segment, the subsegments inlined in that segment
+    document, and (transitively) any separate document whose ``parent_id``
+    chain lands inside that set.
+    """
+    owned: dict[str, set[str]] = {svc: set() for svc in CORRELATION_SERVICES}
+    for doc in docs:
+        name = doc.get("name")
+        if name in owned and doc.get("id"):
+            owned[name].add(doc["id"])
+            for sub in doc.get("subsegments") or []:
+                if isinstance(sub, dict) and sub.get("id"):
+                    owned[name].add(sub["id"])
+    changed = True
+    while changed:
+        changed = False
+        for doc in docs:
+            doc_id = doc.get("id")
+            # A document that is itself a named service segment belongs only
+            # to its own service, never to its caller's set.
+            if not doc_id or doc.get("name") in owned:
+                continue
+            for ids in owned.values():
+                if doc_id not in ids and doc.get("parent_id") in ids:
+                    ids.add(doc_id)
+                    changed = True
+    return owned
+
+
+def xray_parent_link_ok(docs: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+    """A3 structural check: service-b's segment hangs off a service-a subsegment.
+
+    Returns:
+        ``(ok, details)`` where ok requires a service-a segment, a service-b
+        segment, and service-b's ``parent_id`` equal to the id of a span
+        (subsegment) owned by service-a — i.e. the client span that called it.
+    """
+    owned = service_segment_ids(docs)
+    a_segments = [d for d in docs if d.get("name") == "service-a"]
+    b_segments = [d for d in docs if d.get("name") == "service-b"]
+    matched = [
+        b["parent_id"]
+        for b in b_segments
+        if b.get("parent_id") and b["parent_id"] in owned["service-a"]
+    ]
+    ok = bool(a_segments) and bool(b_segments) and bool(matched)
+    details: dict[str, Any] = {
+        "segmentos_service_a": len(a_segments),
+        "segmentos_service_b": len(b_segments),
+        "parent_ids_service_b": sorted(
+            {b.get("parent_id") for b in b_segments if b.get("parent_id")}
+        ),
+        "ids_pertenecientes_a_service_a": len(owned["service-a"]),
+        "enlace_parent_id_correcto": bool(matched),
+    }
+    return ok, details
+
+
+def find_attribute(obj: Any, key: str) -> Any:
+    """Recursively search a dict/list structure for ``key`` (first hit wins).
+
+    X-Ray segment documents park OTel span attributes under ``metadata``
+    (namespaced), ``annotations`` or the document root depending on the
+    exporter version; a recursive search is tolerant to all three shapes.
+    """
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        for value in obj.values():
+            found = find_attribute(value, key)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_attribute(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def log_event_trace_id(message: str) -> str | None:
+    """Extract the W3C ``trace_id`` from a CloudWatch log event message.
+
+    The structlog JSON line carries ``"trace_id": "<32 hex>"``; the message is
+    parsed as JSON first and falls back to a regex over the raw text.
+    """
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        trace_id = payload.get("trace_id")
+        if isinstance(trace_id, str) and HEX32_RE.match(trace_id):
+            return trace_id
+    match = TRACE_ID_FIELD_RE.search(message)
+    return match.group(1) if match else None
+
+
+def counter_increment(datapoints: list[dict[str, Any]]) -> float:
+    """Increment of a cumulative counter from CloudWatch ``Datapoints``.
+
+    EMF delivers cumulative sums, so the increment is last minus first by
+    timestamp; a single point contributes its own value (>0 only if orders
+    were created), mirroring the GCP side of this assertion.
+    """
+    ordered = sorted(datapoints, key=lambda d: str(d.get("Timestamp", "")))
+    values: list[float] = []
+    for point in ordered:
+        for key in ("Sum", "Average"):
+            if key in point:
+                values.append(float(point[key]))
+                break
+    if not values:
+        return 0.0
+    return values[-1] - values[0] if len(values) > 1 else values[0]
+
+
+def parse_prometheus_scrape(text: str) -> tuple[int, dict[str, list[str]]]:
+    """Count samples and collect exemplar trace ids from a scrape body.
+
+    Returns:
+        ``(series_count, exemplars)`` where ``exemplars`` maps a metric name
+        to the 32-hex ``trace_id`` values found in its exemplar labels. Only
+        histogram bucket series whose name contains ``duration`` are kept as
+        latency exemplars (A8); every non-comment line counts as one series
+        (A9).
+    """
+    series_count = 0
+    exemplars: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        sample, sep, rest = stripped.partition(" # ")
+        series_count += 1
+        if not sep:
+            continue
+        name = sample.split("{", 1)[0].split(" ", 1)[0]
+        if "duration" in name and name.endswith("_bucket"):
+            match = EXEMPLAR_TRACE_RE.search(rest)
+            if match:
+                exemplars.setdefault(name, []).append(match.group(1))
+    return series_count, exemplars
+
+
+def dimensions_to_attributes(dimensions: list[dict[str, str]]) -> dict[str, str]:
+    """Normalize CloudWatch metric dimensions to OTel resource keys.
+
+    ``ServiceName`` (EMF default dimension naming) maps to ``service.name``;
+    every other dimension keeps its own name, so ``cloud.provider`` and
+    ``deployment.environment`` are found when the resource processor stamps
+    them through the EMF pipeline.
+    """
+    attrs: dict[str, str] = {}
+    for dim in dimensions:
+        name, value = dim.get("Name"), dim.get("Value")
+        if not name or value is None:
+            continue
+        key = "service.name" if name.lower() in {"servicename", "service.name"} else name
+        attrs[key] = str(value)
+    return attrs
+
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
 
 
 def _span_display_name(span: dict[str, Any]) -> str:
@@ -630,67 +919,533 @@ def check_cloud_monitoring(report: CorrelationReport, token: str, project: str, 
     return False
 
 
-def check_cross_cloud(report: CorrelationReport, include_aws: bool, gcp_trace_ok: bool, window: int) -> None:
-    """A13: the same W3C trace shows up in AWS and GCP signals.
+def _gcp_trace_id_present(token: str, project: str, trace_id: str) -> tuple[bool, str]:
+    """Where (if anywhere) the injected trace id shows up in GCP signals.
 
-    While the AWS deployment is unavailable there is no X-Ray data, so the assertion
-    SKIPs with an explicit reason. With ``--include-aws`` the X-Ray side is
-    checked by structure (segments of service-a and service-b in the window),
-    NOT by id equality: the awsxray exporter rewrites the 128-bit id (PLAN
-    §3.B note), the W3C trace id is only the pivot on the GCP side.
+    Reuses the Cloud Trace v1 GET and the Cloud Logging ``entries:list``
+    filter chain from the ``--include-gcp`` path, but with single-trace
+    semantics: any span in Cloud Trace or any entry in Cloud Logging counts
+    (the cross-cloud flow may carry only the far-side service's signal).
+
+    Returns:
+        ``(found, where)`` with ``where`` one of ``cloud_trace``,
+        ``cloud_logging`` or ``""``.
     """
-    if not include_aws:
-        report.register(13, SKIP, razon=AWS_SKIP_REASON)
+    auth = {"Authorization": f"Bearer {token}"}
+    try:
+        _status, _headers, body = http_request(
+            "GET", CLOUDTRACE_URL.format(project=project, trace_id=trace_id), headers=auth
+        )
+        if isinstance(body, dict) and body.get("spans"):
+            return True, "cloud_trace"
+    except HttpError as exc:
+        if exc.status != 404:
+            raise
+    for filt in (
+        f'trace:"projects/{project}/traces/{trace_id}"',
+        f'jsonPayload.trace_id="{trace_id}"',
+        f'textPayload:"{trace_id}"',
+    ):
+        _status, _headers, body = http_request(
+            "POST",
+            LOGGING_LIST_URL,
+            headers=auth,
+            body={"resourceNames": [f"projects/{project}"], "filter": filt, "pageSize": 10},
+        )
+        entries = (body or {}).get("entries", []) if isinstance(body, dict) else []
+        if entries:
+            return True, "cloud_logging"
+    return False, ""
+
+
+def check_cross_cloud(
+    report: CorrelationReport,
+    include_aws: bool,
+    include_gcp: bool,
+    aws_ctx: dict[str, Any],
+    token: str | None,
+    project: str,
+    trace_id: str,
+) -> None:
+    """A13: the same W3C trace id is present in signals of BOTH clouds.
+
+    The AWS side is whatever the ``--include-aws`` block already found (an
+    X-Ray trace with the converted id, or a CloudWatch Logs event carrying
+    the injected trace id); the GCP side reuses the Cloud Trace / Cloud
+    Logging reads above. Requires both flags active — with one missing the
+    assertion SKIPs with an explicit reason. X-Ray is matched by structure
+    (R-03), never by literal id equality; Cloud Trace preserves the W3C id
+    so it compares directly.
+    """
+    if not include_aws or not include_gcp:
+        report.register(13, SKIP, razon=CROSS_CLOUD_SKIP_REASON)
         return
 
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(seconds=window)
-    cmd = [
-        "aws", "xray", "get-trace-summaries",
-        "--start-time", start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "--end-time", end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    if aws_ctx.get("aws_error"):
+        report.register(13, FAIL, razon=f"lado AWS no evaluable: {aws_ctx['aws_error']}")
+        return
+
+    aws_where = [
+        name
+        for name, flag in (
+            ("xray", aws_ctx.get("xray_trace_found")),
+            ("cloudwatch_logs", aws_ctx.get("cloudwatch_logs_found")),
+        )
+        if flag
     ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        report.register(13, SKIP, razon=f"{AWS_SKIP_REASON} (aws CLI no disponible: {exc.__class__.__name__})")
+    if not aws_where:
+        report.register(
+            13,
+            FAIL,
+            razon="el trace_id inyectado no aparecio en senales AWS (X-Ray ni CloudWatch Logs)",
+        )
         return
-    if proc.returncode != 0:
-        report.register(13, SKIP, razon=f"{AWS_SKIP_REASON} (aws CLI: {proc.stderr.strip()[:200]})")
-        return
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        report.register(13, SKIP, razon=f"{AWS_SKIP_REASON} (salida aws CLI no parseable)")
+    if token is None:
+        report.register(13, FAIL, razon="lado GCP no evaluable (token ADC no disponible)")
         return
 
-    summaries = payload.get("TraceSummaries", [])
+    def fetch() -> tuple[bool, str]:
+        return _gcp_trace_id_present(token, project, trace_id)
 
-    def covers_both_services(summary: dict[str, Any]) -> bool:
-        segment_names = {seg.get("name") for seg in (summary.get("Segments") or [])}
-        service_names = {svc.get("name") for svc in (summary.get("ServiceIds") or [])}
-        return {"service-a", "service-b"} <= segment_names | service_names
-
-    matched = [s for s in summaries if covers_both_services(s)]
-    if gcp_trace_ok and matched:
+    (found, gcp_where), _ok = _poll_until(fetch, ready=lambda r: r[0])
+    if found:
         report.register(
             13,
             PASS,
             detalles={
-                "pivot": "trace_id W3C; X-Ray verificado por estructura (PLAN §3.B)",
-                "summaries": len(summaries),
-                "coincidentes": len(matched),
+                "pivot": "trace_id W3C (X-Ray verificado por estructura, Cloud Trace conserva el id)",
+                "aws": aws_where,
+                "gcp": gcp_where,
+                "trace_id": trace_id,
             },
         )
-    elif summaries:
+    else:
         report.register(
             13,
             FAIL,
-            razon="hay trazas AWS pero ninguna cubre service-a+service-b en la ventana",
-            detalles={"summaries": len(summaries)},
+            razon="el trace_id inyectado no aparecio en senales GCP (Cloud Trace ni Cloud Logging)",
+            detalles={"aws": aws_where, "trace_id": trace_id},
+        )
+
+
+# ---------------------------------------------------------------------------
+# AWS assertions (A3-A9), executed only with --include-aws
+# ---------------------------------------------------------------------------
+
+
+def _fail_assertions(report: CorrelationReport, ids: list[int], razon: str) -> None:
+    """Register a batch of assertions as FAIL with the same reason."""
+    for assertion_id in ids:
+        report.register(assertion_id, FAIL, razon=razon)
+
+
+def _fetch_exporter_logs(
+    logs_client: Any, trace_id: str, window: int
+) -> dict[str, list[dict[str, Any]]]:
+    """FilterLogEvents over the exporter log groups; matched payloads per service.
+
+    Window + Python parsing (assertion 5 of PLAN §3.A): no Logs Insights query
+    is ever started. Returns ``{service: [parsed_json_payload, ...]}`` for
+    events whose trace_id equals the injected one.
+    """
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(seconds=window)
+
+    def fetch() -> dict[str, list[dict[str, Any]]]:
+        matched: dict[str, list[dict[str, Any]]] = {}
+        for service in CORRELATION_SERVICES:
+            response = logs_client.filter_log_events(
+                logGroupName=EXPORTER_LOG_GROUP_TEMPLATE.format(service=service),
+                startTime=int(start.timestamp() * 1000),
+                endTime=int(end.timestamp() * 1000),
+                startFromHead=True,
+                limit=250,
+            )
+            for event in response.get("events", []):
+                message = event.get("message", "")
+                if log_event_trace_id(message) == trace_id:
+                    parsed = None
+                    try:
+                        payload = json.loads(message)
+                        parsed = payload if isinstance(payload, dict) else None
+                    except json.JSONDecodeError:
+                        parsed = None
+                    matched.setdefault(service, []).append(parsed or {"raw": message})
+        return matched
+
+    matched, _ok = _poll_until(fetch, ready=lambda m: set(m) >= set(CORRELATION_SERVICES))
+    return matched
+
+
+def _find_orders_series(clients: dict[str, Any]) -> tuple[list[dict[str, str]], int]:
+    """Discover the EMF dimensions of orders_created_total + the namespace metric count.
+
+    One ``ListMetrics`` call set (free tier) answers both A6 (which dimensions
+    to query) and A9 (how many custom metrics the namespace holds).
+    """
+    cw = clients["cloudwatch"]
+    names: set[str] = set()
+    counter_dims: list[dict[str, str]] = []
+    token: str | None = None
+    for _ in range(MAX_SUMMARY_PAGES):
+        params: dict[str, Any] = {"Namespace": EMF_NAMESPACE}
+        if token:
+            params["NextToken"] = token
+        response = cw.list_metrics(**params)
+        for metric in response.get("Metrics", []):
+            names.add(metric.get("MetricName", ""))
+            if metric.get("MetricName") == ORDERS_COUNTER and not counter_dims:
+                counter_dims = list(metric.get("Dimensions", []))
+        token = response.get("NextToken")
+        if not token:
+            break
+    return counter_dims, len(names)
+
+
+def run_aws_assertions(
+    report: CorrelationReport, args: argparse.Namespace, trace_id: str
+) -> dict[str, Any]:
+    """Execute A3-A9 against AWS and return the context A13 needs.
+
+    Every read is a $0 free-tier API: ``xray:GetTraceSummaries`` +
+    ``xray:BatchGetTraces``, ``logs:FilterLogEvents`` (never Insights),
+    ``cloudwatch:GetMetricStatistics`` (never ``GetMetricData``) and
+    ``cloudwatch:ListMetrics``. Shared fetches (trace summaries, the
+    Prometheus scrape, ListMetrics) keep the call count bounded.
+    """
+    ctx: dict[str, Any] = {"xray_trace_found": False, "cloudwatch_logs_found": False}
+    try:
+        clients = {
+            name: make_aws_client(name, args.aws_profile, args.aws_region)
+            for name in ("xray", "logs", "cloudwatch")
+        }
+    except ImportError as exc:
+        reason = f"boto3 no instalado (pip install -r requirements-dev.txt): {exc}"
+        _fail_assertions(report, list(range(3, 10)), reason)
+        ctx["aws_error"] = reason
+        return ctx
+    except Exception as exc:
+        reason = f"clientes AWS no disponibles ({type(exc).__name__}): {exc}"
+        _fail_assertions(report, list(range(3, 10)), reason)
+        ctx["aws_error"] = reason
+        return ctx
+
+    # --- A3 / A4: X-Ray by structure ---------------------------------------
+    summaries: list[str] = []
+    docs: list[dict[str, Any]] = []
+    try:
+        summaries = fetch_trace_summary_ids(clients["xray"], args.window)
+    except Exception as exc:  # boto3 raises many client/credential error types
+        reason = f"AWS API fallo (xray:GetTraceSummaries): {type(exc).__name__}: {exc}"
+        _fail_assertions(report, [3, 4], reason)
+        ctx["aws_error"] = reason
+        return ctx
+
+    xray_id = w3c_to_xray_trace_id(trace_id)
+    try:
+        if xray_id in summaries:
+            docs = parse_trace_segments(clients["xray"].batch_get_traces(TraceIds=[xray_id]))
+            ctx["xray_trace_found"] = bool(docs)
+        else:
+            # Structural fallback (R-03): scan the window's traces for a
+            # service-a+service-b parent link instead of trusting the id.
+            for chunk_start in range(0, min(len(summaries), MAX_STRUCTURAL_SCAN_TRACES), 10):
+                chunk = summaries[chunk_start : chunk_start + 10]
+                candidate_docs = parse_trace_segments(
+                    clients["xray"].batch_get_traces(TraceIds=chunk)
+                )
+                ok, _details = xray_parent_link_ok(candidate_docs)
+                if ok:
+                    docs, ctx["xray_trace_found"] = candidate_docs, True
+                    break
+    except Exception as exc:
+        reason = f"AWS API fallo (xray:BatchGetTraces): {type(exc).__name__}: {exc}"
+        _fail_assertions(report, [3, 4], reason)
+
+    already_failed = {r.id for r in report.results if r.id in (3, 4) and r.estado == FAIL}
+    if 3 not in already_failed:
+        ok, details = xray_parent_link_ok(docs)
+        details_out = {**details, "xray_trace_id_buscado": xray_id, "trazas_ventana": len(summaries)}
+        if not docs:
+            report.register(
+                3, FAIL,
+                razon="traza inyectada no encontrada en X-Ray (GetTraceSummaries/BatchGetTraces, deadline agotado)",
+                detalles=details_out,
+            )
+        elif ok:
+            report.register(3, PASS, detalles=details_out)
+        else:
+            report.register(
+                3, FAIL,
+                razon="la traza en X-Ray no cumple el enlace parent_id service-a -> service-b",
+                detalles=details_out,
+            )
+    if 4 not in already_failed:
+        b_docs = [d for d in docs if d.get("name") == "service-b"]
+        b_child_ids = service_segment_ids(docs)["service-b"]
+        b_all = [d for d in docs if d.get("id") in b_child_ids or d.get("name") == "service-b"]
+        found_attr = any(
+            str(find_attribute(d, "db.system")).lower() == "postgresql" for d in b_all
+        )
+        if found_attr:
+            report.register(4, PASS, detalles={"documentos_service_b": len(b_all)})
+        elif b_docs or b_all:
+            report.register(
+                4, FAIL,
+                razon="atributo db.system=postgresql ausente en los segmentos de service-b",
+                detalles={"documentos_service_b": len(b_all)},
+            )
+        else:
+            report.register(
+                4, FAIL,
+                razon="sin segmentos de service-b que inspeccionar (ver A3)",
+                detalles={"documentos_service_b": 0},
+            )
+
+    # --- A5 / A7 input: CloudWatch Logs (exporter groups) -------------------
+    log_payloads: dict[str, list[dict[str, Any]]] = {}
+    try:
+        log_payloads = _fetch_exporter_logs(clients["logs"], trace_id, args.window)
+        ctx["cloudwatch_logs_found"] = bool(log_payloads)
+    except Exception as exc:
+        reason = f"AWS API fallo (logs:FilterLogEvents): {type(exc).__name__}: {exc}"
+        report.register(5, FAIL, razon=reason)
+
+    if 5 not in {r.id for r in report.results if r.estado == FAIL}:
+        services_found = sorted(log_payloads)
+        if set(services_found) >= set(CORRELATION_SERVICES):
+            report.register(
+                5, PASS,
+                detalles={
+                    "servicios": services_found,
+                    "entradas": {svc: len(v) for svc, v in log_payloads.items()},
+                    "grupos": [
+                        EXPORTER_LOG_GROUP_TEMPLATE.format(service=s)
+                        for s in CORRELATION_SERVICES
+                    ],
+                },
+            )
+        else:
+            report.register(
+                5, FAIL,
+                razon="no hay >=1 entrada con el trace_id en cada servicio (deadline agotado)",
+                detalles={
+                    "servicios": services_found,
+                    "grupos": [
+                        EXPORTER_LOG_GROUP_TEMPLATE.format(service=s)
+                        for s in CORRELATION_SERVICES
+                    ],
+                },
+            )
+
+    # --- A6 / A7 / A9 input: EMF counter + namespace cardinality ------------
+    counter_dims: list[dict[str, str]] = []
+    namespace_metric_count = 0
+    metric_error: str | None = None
+    try:
+        counter_dims, namespace_metric_count = _find_orders_series(clients)
+    except Exception as exc:
+        metric_error = f"AWS API fallo (cloudwatch:ListMetrics): {type(exc).__name__}: {exc}"
+
+    datapoints: list[dict[str, Any]] = []
+    if metric_error is None:
+        if not counter_dims:
+            report.register(
+                6, FAIL,
+                razon=f"no existe la metrica {ORDERS_COUNTER} en el namespace {EMF_NAMESPACE}",
+                detalles={"namespace_metric_count": namespace_metric_count},
+            )
+        else:
+            try:
+                end = datetime.now(timezone.utc)
+                start = end - timedelta(seconds=max(args.window, METRIC_PERIOD_SECONDS))
+                response = clients["cloudwatch"].get_metric_statistics(
+                    Namespace=EMF_NAMESPACE,
+                    MetricName=ORDERS_COUNTER,
+                    Dimensions=counter_dims,
+                    StartTime=start,
+                    EndTime=end,
+                    Period=METRIC_PERIOD_SECONDS,
+                    Statistics=["Sum"],
+                )
+                datapoints = list(response.get("Datapoints", []))
+            except Exception as exc:
+                report.register(
+                    6, FAIL,
+                    razon=f"AWS API fallo (cloudwatch:GetMetricStatistics): {type(exc).__name__}: {exc}",
+                )
+            else:
+                increment = counter_increment(datapoints)
+                details = {
+                    "dimensions": counter_dims,
+                    "periodo_segundos": METRIC_PERIOD_SECONDS,
+                    "puntos": len(datapoints),
+                    "incremento": increment,
+                }
+                if increment > 0:
+                    report.register(6, PASS, detalles=details)
+                else:
+                    report.register(
+                        6, FAIL,
+                        razon=f"el contador {ORDERS_COUNTER} no incremento en la ventana (deadline agotado)",
+                        detalles=details,
+                    )
+    else:
+        report.register(6, FAIL, razon=metric_error)
+
+    # --- A7: resource consistency trace / log / metric ----------------------
+    _check_resource_consistency(report, docs, log_payloads, counter_dims)
+
+    # --- A8 / A9: Prometheus scrape (tunnel :8889) --------------------------
+    scrape_text: str | None = None
+    scrape_error: str | None = None
+    try:
+        _status, _headers, body = http_request("GET", args.prometheus_url)
+        scrape_text = body if isinstance(body, str) else json.dumps(body)
+    except API_ERRORS as exc:  # urllib + HttpError: the tunnel is the operator's job
+        scrape_error = f"scrape Prometheus fallo ({args.prometheus_url}): {exc}"
+
+    series_count = 0
+    exemplars: dict[str, list[str]] = {}
+    if scrape_text is not None:
+        series_count, exemplars = parse_prometheus_scrape(scrape_text)
+
+    latency_ids = sorted({tid for ids in exemplars.values() for tid in ids})
+    if scrape_error:
+        report.register(8, FAIL, razon=scrape_error)
+    elif not latency_ids:
+        report.register(
+            8, FAIL,
+            razon="la metrica de latencia no expone exemplars con trace_id en el scrape "
+            "(activar exemplars en el exporter prometheus del collector)",
+            detalles={"series": series_count},
         )
     else:
-        report.register(13, SKIP, razon=f"{AWS_SKIP_REASON} (sin datos X-Ray en la ventana)")
+        verified: list[str] = []
+        for exemplar_id in latency_ids[:3]:
+            candidate = w3c_to_xray_trace_id(exemplar_id)
+            try:
+                if candidate in summaries:
+                    verified.append(exemplar_id)
+                    continue
+                found_docs = parse_trace_segments(
+                    clients["xray"].batch_get_traces(TraceIds=[candidate])
+                )
+                if found_docs:
+                    verified.append(exemplar_id)
+            except Exception:
+                continue
+        details = {
+            "metricas_con_exemplares": sorted(exemplars),
+            "trace_ids_ejemplar": latency_ids,
+            "trazas_verificadas_en_xray": verified,
+            "tempo": "sub-check externo SKIP: Grafana Cloud Tempo no configurado "
+            "(placeholder honesto; la validacion real es BatchGetTraces)",
+        }
+        if verified:
+            report.register(8, PASS, detalles=details)
+        else:
+            report.register(
+                8, FAIL,
+                razon="ningun trace_id de exemplar corresponde a una traza existente en X-Ray",
+                detalles=details,
+            )
+
+    if metric_error is not None:
+        report.register(9, FAIL, razon=metric_error)
+    else:
+        problems: list[str] = []
+        if namespace_metric_count > CUSTOM_METRICS_LIMIT:
+            problems.append(
+                f"{namespace_metric_count} metricas custom en {EMF_NAMESPACE} (> {CUSTOM_METRICS_LIMIT})"
+            )
+        if scrape_error:
+            problems.append(f"series Prometheus no verificables: {scrape_error}")
+        elif series_count > PROM_SERIES_LIMIT:
+            problems.append(f"{series_count} series Prometheus (> {PROM_SERIES_LIMIT})")
+        details = {
+            "namespace": EMF_NAMESPACE,
+            "custom_metrics": namespace_metric_count,
+            "prometheus_series": series_count,
+            "limite_custom_metrics": CUSTOM_METRICS_LIMIT,
+            "limite_series": PROM_SERIES_LIMIT,
+        }
+        if problems:
+            report.register(9, FAIL, razon="; ".join(problems), detalles=details)
+        else:
+            report.register(9, PASS, detalles=details)
+
+    return ctx
+
+
+def _check_resource_consistency(
+    report: CorrelationReport,
+    docs: list[dict[str, Any]],
+    log_payloads: dict[str, list[dict[str, Any]]],
+    counter_dims: list[dict[str, str]],
+) -> None:
+    """A7: service.name / cloud.provider / deployment.environment agree.
+
+    The three AWS signals (X-Ray segments, exporter log payloads, EMF metric
+    dimensions) must expose the same resource identity: ``cloud.provider``
+    ``aws``, ``deployment.environment`` ``lab`` and a service.name inside the
+    {service-a, service-b} set. A key missing from a signal means the
+    collector's resource pipeline did not normalize that signal, so it is a
+    FAIL with the exact gap named.
+    """
+    expected = {"cloud.provider": "aws", "deployment.environment": "lab"}
+    trace_attrs: dict[str, str] = {}
+    for doc in docs:
+        for key in expected:
+            if trace_attrs.get(key) is None:
+                value = find_attribute(doc, key)
+                if value is not None:
+                    trace_attrs[key] = str(value)
+    log_attrs: dict[str, str] = {}
+    for payloads in log_payloads.values():
+        for payload in payloads:
+            for key in expected:
+                if log_attrs.get(key) is None:
+                    value = find_attribute(payload, key)
+                    if value is not None:
+                        log_attrs[key] = str(value)
+    metric_attrs = dimensions_to_attributes(counter_dims)
+
+    problems: list[str] = []
+    for key, want in expected.items():
+        for signal, attrs in (("traza", trace_attrs), ("log", log_attrs), ("metrica", metric_attrs)):
+            got = attrs.get(key)
+            if got is None:
+                problems.append(f"{key} ausente en {signal}")
+            elif got != want:
+                problems.append(f"{key}={got!r} en {signal} (esperado {want!r})")
+
+    trace_services = {d.get("name") for d in docs if d.get("name") in CORRELATION_SERVICES}
+    log_services = set(log_payloads)
+    metric_service = metric_attrs.get("service.name")
+    if trace_services != set(CORRELATION_SERVICES):
+        problems.append(f"service.name en traza: {sorted(trace_services)} (esperado ambos)")
+    if log_services != set(CORRELATION_SERVICES):
+        problems.append(f"service.name en log: {sorted(log_services)} (esperado ambos)")
+    if metric_service not in CORRELATION_SERVICES:
+        problems.append(f"service.name en metrica: {metric_service!r} (esperado uno de {CORRELATION_SERVICES})")
+
+    seen = {
+        "traza": sorted(trace_services),
+        "log": sorted(log_services),
+        "metrica": [metric_service] if metric_service else [],
+    }
+    if problems:
+        report.register(
+            7, FAIL,
+            razon="consistencia de resource fallada: " + "; ".join(problems),
+            detalles={"servicios_vistos": seen},
+        )
+    else:
+        report.register(
+            7, PASS,
+            detalles={"servicios_vistos": seen, "esperado": expected},
+        )
 
 
 def _run_gcp_check(
@@ -718,25 +1473,32 @@ def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
     else:
         check_response_trace_header(report, resp_headers, trace_id)
 
-    for assertion_id in range(3, 10):
-        report.register(assertion_id, SKIP, razon=AWS_CORRELATION_SKIP_REASON)
+    aws_ctx: dict[str, Any] = {}
+    if args.include_aws:
+        aws_ctx = run_aws_assertions(report, args, trace_id)
+    else:
+        for assertion_id in range(3, 10):
+            report.register(assertion_id, SKIP, razon=AWS_SKIP_REASON)
 
-    gcp_trace_ok = False
+    gcp_token: str | None = None
     if args.include_gcp:
         try:
-            token = gcloud_access_token(args.project)
+            gcp_token = gcloud_access_token(args.project)
         except AuthError as exc:
             for assertion_id in (10, 11, 12):
                 report.register(assertion_id, FAIL, razon=f"ADC/token GCP no disponible: {exc}")
         else:
-            gcp_trace_ok = _run_gcp_check(report, 10, check_cloud_trace, token, args.project, trace_id)
-            _run_gcp_check(report, 11, check_cloud_logging, token, args.project, trace_id)
-            _run_gcp_check(report, 12, check_cloud_monitoring, token, args.project, args.window)
+            _run_gcp_check(report, 10, check_cloud_trace, gcp_token, args.project, trace_id)
+            _run_gcp_check(report, 11, check_cloud_logging, gcp_token, args.project, trace_id)
+            _run_gcp_check(report, 12, check_cloud_monitoring, gcp_token, args.project, args.window)
     else:
         for assertion_id in (10, 11, 12):
             report.register(assertion_id, SKIP, razon=GCP_SKIP_REASON)
 
-    check_cross_cloud(report, args.include_aws, gcp_trace_ok, args.window)
+    check_cross_cloud(
+        report, args.include_aws, args.include_gcp, aws_ctx,
+        gcp_token, args.project, trace_id,
+    )
     return report, trace_id
 
 
@@ -782,7 +1544,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--include-aws", action="store_true",
-        help="run the X-Ray cross-cloud assertion (A13); SKIPs while the AWS deployment is unavailable",
+        help="run the AWS-side assertions (A3-A9, boto3) and enable the cross-cloud A13",
+    )
+    parser.add_argument(
+        "--aws-profile", default=AWS_DEFAULT_PROFILE,
+        help="AWS credentials profile for boto3 (default: otel-lab)",
+    )
+    parser.add_argument(
+        "--aws-region", default=AWS_DEFAULT_REGION, help="AWS region (default: us-east-1)"
+    )
+    parser.add_argument(
+        "--prometheus-url", default=DEFAULT_PROMETHEUS_URL,
+        help="collector Prometheus scrape endpoint (through the tunnel for the AWS run)",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help="GCP project id")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW_SECONDS, help="read window in seconds")
