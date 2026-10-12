@@ -105,6 +105,10 @@ METRIC_PERIOD_SECONDS = 300
 # call count in the tens per run (R-05/R-14).
 MAX_SUMMARY_PAGES = 10
 MAX_STRUCTURAL_SCAN_TRACES = 30
+# X-Ray BatchGetTraces rejects more than 5 ids per call ("Exceeding maximum
+# query size: 5", verified live 2026-10-12). The structural scan pages the
+# window in chunks of this size.
+BATCH_GET_TRACES_MAX_IDS = 5
 CUSTOM_METRICS_LIMIT = 10
 PROM_SERIES_LIMIT = 1500
 # Prometheus exporter of the collector. SSM port-forwarding to a Fargate task
@@ -383,7 +387,11 @@ def fetch_trace_summary_ids(xray_client: Any, window: int) -> list[str]:
             params["NextToken"] = token
         response = xray_client.get_trace_summaries(**params)
         for summary in response.get("TraceSummaries", []):
-            trace_id = summary.get("TraceId")
+            # botocore model: TraceIdSummary member is "Id" (locationName
+            # "id"); "TraceId" does NOT exist in the response (verified live
+            # 2026-10-12: pages came back with 102 summaries and the script
+            # collected 0 ids because it read a phantom key).
+            trace_id = summary.get("Id")
             if trace_id:
                 ids.append(trace_id)
         token = response.get("NextToken")
@@ -395,11 +403,18 @@ def fetch_trace_summary_ids(xray_client: Any, window: int) -> list[str]:
 def parse_trace_segments(batch_response: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten a ``BatchGetTraces`` response into segment documents (dicts).
 
-    botocore returns each segment as a JSON STRING; tests may pass dicts.
+    Three wire shapes have to be tolerated (all verified live 2026-10-12):
+    the legacy ``TraceSegments`` list of JSON strings, the botocore 1.43
+    ``Segments`` list whose items are ``{"Document": "<json str>", "Id": ...}``
+    envelopes, and plain dicts (offline tests). Each flattened segment
+    document is the X-Ray segment itself (snake_case ``parent_id`` etc.).
     """
     docs: list[dict[str, Any]] = []
     for trace in batch_response.get("Traces", []):
-        for raw in trace.get("TraceSegments", []):
+        raw_segments = trace.get("Segments") or trace.get("TraceSegments") or []
+        for raw in raw_segments:
+            if isinstance(raw, dict) and "Document" in raw:
+                raw = raw["Document"]
             doc = raw if isinstance(raw, dict) else json.loads(raw)
             if isinstance(doc, dict):
                 docs.append(doc)
@@ -466,6 +481,26 @@ def xray_parent_link_ok(docs: list[dict[str, Any]]) -> tuple[bool, dict[str, Any
     return ok, details
 
 
+def xray_graph_edges(graph: dict[str, Any]) -> list[tuple[str, str]]:
+    """(source service name, target service name) pairs of a GetTraceGraph response.
+
+    X-Ray's graph view resolves the ``parent_id`` chain INCLUDING the remote
+    subsegment documents that BatchGetTraces omits (verified live 2026-10-12:
+    the OTLP->X-Ray translator sends the httpx client span as its own
+    ``type: subsegment`` doc; X-Ray stores it but the segment listing never
+    returns it, leaving service-b's ``parent_id`` pointing at an invisible id).
+    """
+    services = graph.get("Services", []) or []
+    by_ref = {s.get("ReferenceId"): s for s in services}
+    edges: list[tuple[str, str]] = []
+    for svc in services:
+        for edge in svc.get("Edges", []) or []:
+            target = by_ref.get(edge.get("ReferenceId"))
+            if target is not None:
+                edges.append((svc.get("Name", ""), target.get("Name", "")))
+    return edges
+
+
 def find_attribute(obj: Any, key: str) -> Any:
     """Recursively search a dict/list structure for ``key`` (first hit wins).
 
@@ -506,23 +541,21 @@ def log_event_trace_id(message: str) -> str | None:
     return match.group(1) if match else None
 
 
-def counter_increment(datapoints: list[dict[str, Any]]) -> float:
-    """Increment of a cumulative counter from CloudWatch ``Datapoints``.
+def emf_window_increment(datapoints: list[dict[str, Any]]) -> float:
+    """Total increment of an EMF counter inside the window.
 
-    EMF delivers cumulative sums, so the increment is last minus first by
-    timestamp; a single point contributes its own value (>0 only if orders
-    were created), mirroring the GCP side of this assertion.
+    The awsemf exporter publishes each bucket as the DELTA observed in that
+    bucket (live 2026-10-12: ``[1.0, 0.0, 0.0]`` after one POST), so the
+    window's increment is the SUM of the bucket values — last-minus-first
+    would go negative whenever the traffic lands in the first bucket.
     """
-    ordered = sorted(datapoints, key=lambda d: str(d.get("Timestamp", "")))
-    values: list[float] = []
-    for point in ordered:
+    total = 0.0
+    for point in datapoints:
         for key in ("Sum", "Average"):
             if key in point:
-                values.append(float(point[key]))
+                total += float(point[key])
                 break
-    if not values:
-        return 0.0
-    return values[-1] - values[0] if len(values) > 1 else values[0]
+    return total
 
 
 def parse_prometheus_scrape(text: str) -> tuple[int, dict[str, list[str]]]:
@@ -1088,10 +1121,17 @@ def _find_orders_series(clients: dict[str, Any]) -> tuple[list[dict[str, str]], 
 
     One ``ListMetrics`` call set (free tier) answers both A6 (which dimensions
     to query) and A9 (how many custom metrics the namespace holds).
+
+    When several dimension sets exist for the counter (legacy series keep
+    living in CloudWatch for hours after a collector config change), prefer
+    the one carrying the resource identity (``cloud.provider`` +
+    ``deployment.environment``): that is the series A7 can cross-check
+    against the trace and the logs. Falls back to the first series found so
+    A6 still answers with real data.
     """
     cw = clients["cloudwatch"]
     names: set[str] = set()
-    counter_dims: list[dict[str, str]] = []
+    counter_series: list[list[dict[str, str]]] = []
     token: str | None = None
     for _ in range(MAX_SUMMARY_PAGES):
         params: dict[str, Any] = {"Namespace": EMF_NAMESPACE}
@@ -1100,11 +1140,19 @@ def _find_orders_series(clients: dict[str, Any]) -> tuple[list[dict[str, str]], 
         response = cw.list_metrics(**params)
         for metric in response.get("Metrics", []):
             names.add(metric.get("MetricName", ""))
-            if metric.get("MetricName") == ORDERS_COUNTER and not counter_dims:
-                counter_dims = list(metric.get("Dimensions", []))
+            if metric.get("MetricName") == ORDERS_COUNTER:
+                counter_series.append(list(metric.get("Dimensions", [])))
         token = response.get("NextToken")
         if not token:
             break
+    counter_dims: list[dict[str, str]] = []
+    for dims in counter_series:
+        dim_names = {d.get("Name") for d in dims}
+        if {"cloud.provider", "deployment.environment"} <= dim_names:
+            counter_dims = dims
+            break
+    if not counter_dims and counter_series:
+        counter_dims = counter_series[0]
     return counter_dims, len(names)
 
 
@@ -1150,37 +1198,87 @@ def run_aws_assertions(
     docs: list[dict[str, Any]] = []
     xray_id = w3c_to_xray_trace_id(trace_id)
     xray_error: str | None = None
-    try:
-        summaries = fetch_trace_summary_ids(clients["xray"], args.window)
-    except Exception as exc:  # boto3 raises many client/credential error types
-        xray_error = f"AWS API fallo (xray:GetTraceSummaries): {type(exc).__name__}: {exc}"
 
-    if xray_error is None:
-        try:
-            if xray_id in summaries:
-                docs = parse_trace_segments(clients["xray"].batch_get_traces(TraceIds=[xray_id]))
-                ctx["xray_trace_found"] = bool(docs)
-            else:
-                # Structural fallback (R-03): scan the window's traces for a
-                # service-a+service-b parent link instead of trusting the id.
-                for chunk_start in range(0, min(len(summaries), MAX_STRUCTURAL_SCAN_TRACES), 10):
-                    chunk = summaries[chunk_start : chunk_start + 10]
-                    candidate_docs = parse_trace_segments(
-                        clients["xray"].batch_get_traces(TraceIds=chunk)
-                    )
-                    ok, _details = xray_parent_link_ok(candidate_docs)
-                    if ok:
-                        docs, ctx["xray_trace_found"] = candidate_docs, True
-                        break
-        except Exception as exc:
-            xray_error = f"AWS API fallo (xray:BatchGetTraces): {type(exc).__name__}: {exc}"
+    def _fetch_xray_window() -> tuple[list[str], list[dict[str, Any]], bool]:
+        """One X-Ray attempt: summaries + exact-id match or structural scan.
+
+        X-Ray indexes ``PutTraceSegments`` with a 30-90 s lag, like the other
+        readers (single-read bug verified live 2026-10-12: A3 FAILed with
+        ``trazas_ventana=0`` while the trace appeared ~1 min later). The
+        structural fallback (R-03) stays: scan the window for a
+        service-a -> service-b parent link instead of trusting the id alone.
+        """
+        window_summaries = fetch_trace_summary_ids(clients["xray"], args.window)
+        if xray_id in window_summaries:
+            exact_docs = parse_trace_segments(
+                clients["xray"].batch_get_traces(TraceIds=[xray_id])
+            )
+            # ready only if the segments are actually retrievable: an id in
+            # the summaries with no docs yet is still mid-ingest.
+            return window_summaries, exact_docs, bool(exact_docs)
+        for chunk_start in range(
+            0, min(len(window_summaries), MAX_STRUCTURAL_SCAN_TRACES), BATCH_GET_TRACES_MAX_IDS
+        ):
+            chunk = window_summaries[
+                chunk_start : chunk_start + BATCH_GET_TRACES_MAX_IDS
+            ]
+            candidate_docs = parse_trace_segments(
+                clients["xray"].batch_get_traces(TraceIds=chunk)
+            )
+            ok, _details = xray_parent_link_ok(candidate_docs)
+            if ok:
+                return window_summaries, candidate_docs, True
+        return window_summaries, [], False
+
+    try:
+        (summaries, docs, found), _ok = _poll_until(
+            _fetch_xray_window, ready=lambda r: r[2]
+        )
+        ctx["xray_trace_found"] = found
+    except Exception as exc:  # boto3 raises many client/credential error types
+        xray_error = (
+            f"AWS API fallo (xray:GetTraceSummaries/BatchGetTraces): "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     if xray_error is not None:
         report.register(3, FAIL, razon=xray_error)
         report.register(4, FAIL, razon=xray_error)
     else:
         ok, details = xray_parent_link_ok(docs)
-        details_out = {**details, "xray_trace_id_buscado": xray_id, "trazas_ventana": len(summaries)}
+        graph_edges: list[tuple[str, str]] = []
+        graph_error: str | None = None
+
+        def _ensure_graph() -> list[tuple[str, str]]:
+            """Fetch (once) the GetTraceGraph edges for the injected trace.
+
+            Needed whenever the segment-level view is not conclusive: the
+            OTLP->X-Ray translator sends client spans as separate
+            ``type: subsegment`` docs that BatchGetTraces omits, so the
+            service-a -> service-b link and the service-b -> Database edge
+            are only visible through the graph (live 2026-10-12).
+            """
+            nonlocal graph_edges, graph_error
+            if not graph_edges and graph_error is None:
+                try:
+                    graph_edges = xray_graph_edges(
+                        clients["xray"].get_trace_graph(TraceIds=[xray_id])
+                    )
+                except Exception as exc:
+                    graph_error = f"{type(exc).__name__}: {exc}"
+            return graph_edges
+
+        if docs and not ok and ("service-a", "service-b") in _ensure_graph():
+            ok = True
+
+        details_out = {
+            **details,
+            "xray_trace_id_buscado": xray_id,
+            "trazas_ventana": len(summaries),
+            "aristas_grafo": [list(e) for e in sorted(set(graph_edges))],
+        }
+        if graph_error:
+            details_out["error_grafo"] = graph_error
         if not docs:
             report.register(
                 3, FAIL,
@@ -1201,8 +1299,25 @@ def run_aws_assertions(
         found_attr = any(
             str(find_attribute(d, "db.system")).lower() == "postgresql" for d in b_all
         )
+        if not found_attr and docs:
+            # X-Ray-native representation: the translator maps the OTel
+            # db.system attribute to sql.database_type inside an inferred
+            # Database::SQL segment, and that segment belongs to service-b
+            # when the trace graph shows a service-b -> db edge.
+            sql_docs = [
+                d for d in docs
+                if str(find_attribute(d, "database_type")).lower() == "postgresql"
+            ]
+            b_db_edge = any(src == "service-b" for src, _ in _ensure_graph())
+            found_attr = bool(sql_docs) and b_db_edge
         if found_attr:
-            report.register(4, PASS, detalles={"documentos_service_b": len(b_all)})
+            report.register(
+                4, PASS,
+                detalles={
+                    "documentos_service_b": len(b_all),
+                    "aristas_grafo": [list(e) for e in sorted(set(graph_edges))],
+                },
+            )
         elif b_docs or b_all:
             report.register(
                 4, FAIL,
@@ -1274,25 +1389,34 @@ def run_aws_assertions(
             )
         else:
             try:
-                end = datetime.now(timezone.utc)
-                start = end - timedelta(seconds=max(args.window, METRIC_PERIOD_SECONDS))
-                response = clients["cloudwatch"].get_metric_statistics(
-                    Namespace=EMF_NAMESPACE,
-                    MetricName=ORDERS_COUNTER,
-                    Dimensions=counter_dims,
-                    StartTime=start,
-                    EndTime=end,
-                    Period=METRIC_PERIOD_SECONDS,
-                    Statistics=["Sum"],
+                def _fetch_emf_datapoints() -> list[dict[str, Any]]:
+                    end = datetime.now(timezone.utc)
+                    start = end - timedelta(seconds=max(args.window, METRIC_PERIOD_SECONDS))
+                    response = clients["cloudwatch"].get_metric_statistics(
+                        Namespace=EMF_NAMESPACE,
+                        MetricName=ORDERS_COUNTER,
+                        Dimensions=counter_dims,
+                        StartTime=start,
+                        EndTime=end,
+                        Period=METRIC_PERIOD_SECONDS,
+                        Statistics=["Sum"],
+                    )
+                    return list(response.get("Datapoints", []))
+
+                # EMF lands in CloudWatch with a ~1 min lag after the batch
+                # flush: poll until the window shows a positive delta
+                # (single-read A6 FAILed live 2026-10-12 for this reason).
+                datapoints, _ok = _poll_until(
+                    _fetch_emf_datapoints,
+                    ready=lambda dps: emf_window_increment(dps) > 0,
                 )
-                datapoints = list(response.get("Datapoints", []))
             except Exception as exc:
                 report.register(
                     6, FAIL,
                     razon=f"AWS API fallo (cloudwatch:GetMetricStatistics): {type(exc).__name__}: {exc}",
                 )
             else:
-                increment = counter_increment(datapoints)
+                increment = emf_window_increment(datapoints)
                 details = {
                     "dimensions": counter_dims,
                     "periodo_segundos": METRIC_PERIOD_SECONDS,
@@ -1423,6 +1547,12 @@ def _check_resource_consistency(
         for key in expected:
             if trace_attrs.get(key) is None:
                 value = find_attribute(doc, key)
+                if value is None:
+                    # The OTLP->X-Ray translator parks OTel resource
+                    # attributes in metadata.default under the namespaced
+                    # key "otel.resource.<key>" (verified live 2026-10-12);
+                    # the bare key never appears in the segment document.
+                    value = find_attribute(doc, f"otel.resource.{key}")
                 if value is not None:
                     trace_attrs[key] = str(value)
     log_attrs: dict[str, str] = {}

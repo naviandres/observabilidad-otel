@@ -147,14 +147,20 @@ def test_log_event_trace_id_from_json_and_text(vc):
     assert vc.log_event_trace_id("no trace here") is None
 
 
-def test_counter_increment_last_minus_first(vc):
+def test_emf_window_increment_sums_delta_buckets(vc):
+    """EMF publica cada bucket como DELTA observada (live 2026-10-12:
+    [1.0, 0.0, 0.0] tras un POST). El incremento de la ventana es la SUMA;
+    last-minus-first daria negativo cuando el trafico cae en el primer
+    bucket (causa exacta del A6 FAIL de la corrida corrA9)."""
     points = [
-        {"Timestamp": "2026-10-12T00:01:00Z", "Sum": 5.0},
-        {"Timestamp": "2026-10-12T00:00:00Z", "Sum": 2.0},
+        {"Timestamp": "2026-10-12T00:01:00Z", "Sum": 0.0},
+        {"Timestamp": "2026-10-12T00:00:00Z", "Sum": 1.0},
+        {"Timestamp": "2026-10-12T00:02:00Z", "Sum": 0.0},
     ]
-    assert vc.counter_increment(points) == 3.0
-    assert vc.counter_increment([{"Timestamp": "t", "Sum": 4.0}]) == 4.0
-    assert vc.counter_increment([]) == 0.0
+    assert vc.emf_window_increment(points) == 1.0
+    assert vc.emf_window_increment([{"Timestamp": "t", "Sum": 4.0}]) == 4.0
+    assert vc.emf_window_increment([]) == 0.0
+    assert vc.emf_window_increment([{"Timestamp": "t", "Average": 2.0}]) == 2.0
 
 
 def test_parse_prometheus_scrape_counts_and_exemplars(vc):
@@ -198,25 +204,79 @@ def test_dimensions_to_attributes_maps_servicename(vc):
 
 
 class FakeXRay:
-    def __init__(self, summaries: list[str], traces: dict[str, list[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        summaries: list[str],
+        traces: dict[str, list[dict[str, Any]]],
+        graph_edges: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.summaries = summaries
         self.traces = traces
+        self.graph_edges = graph_edges or []
         self.calls: list[str] = []
         self.summary_kwargs: list[dict[str, Any]] = []
+        self.batch_chunks: list[list[str]] = []
 
     def get_trace_summaries(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("get_trace_summaries")
         self.summary_kwargs.append(kwargs)
-        return {"TraceSummaries": [{"TraceId": t} for t in self.summaries]}
+        # Real botocore shape: TraceIdSummary exposes the id under "Id"
+        # (there is NO "TraceId" member — live 2026-10-12 proved the phantom
+        # key silently collected 0 ids over 102 real summaries).
+        return {"TraceSummaries": [{"Id": t} for t in self.summaries]}
 
     def batch_get_traces(self, TraceIds: list[str]) -> dict[str, Any]:
         self.calls.append("batch_get_traces")
+        # API real (verificado en vivo 2026-10-12): BatchGetTraces rechaza
+        # mas de 5 ids -> InvalidRequestException "Exceeding maximum query
+        # size: 5". Ningun caller del script puede pedir mas de 5.
+        assert len(TraceIds) <= 5, f"BatchGetTraces maximo 5 ids, pidieron {len(TraceIds)}"
+        self.batch_chunks.append(list(TraceIds))
         out = []
         for trace_id in TraceIds:
             docs = self.traces.get(trace_id, [])
             if docs:
-                out.append({"Id": trace_id, "TraceSegments": [json.dumps(d) for d in docs]})
+                # Forma REAL de botocore 1.43 (verificada en vivo 2026-10-12):
+                # TraceData.Segments es una lista de envelopes
+                # {"Document": "<json str>", "Id": ...}; el viejo
+                # TraceSegments=[str] ya no existe en el modelo.
+                out.append(
+                    {
+                        "Id": trace_id,
+                        "Segments": [
+                            {"Document": json.dumps(d), "Id": d.get("id", trace_id)}
+                            for d in docs
+                        ],
+                    }
+                )
         return {"Traces": out}
+
+    def get_trace_graph(self, TraceIds: list[str]) -> dict[str, Any]:
+        """Shape of the real GetTraceGraph response (Services + Edges with
+        ReferenceId back-references), live-verified 2026-10-12."""
+        self.calls.append("get_trace_graph")
+        names: list[str] = []
+        for src, dst in self.graph_edges:
+            for n in (src, dst):
+                if n not in names:
+                    names.append(n)
+        ref = {n: i for i, n in enumerate(names)}
+        services = []
+        for n in names:
+            edges = [
+                {"ReferenceId": ref[dst], "SummaryStatistics": {"TotalCount": 1}}
+                for src, dst in self.graph_edges
+                if src == n
+            ]
+            services.append(
+                {
+                    "ReferenceId": ref[n],
+                    "Name": n,
+                    "Type": "Database::SQL" if n in ("orders", "inventory") else "AWS::ECS::Fargate",
+                    "Edges": edges,
+                }
+            )
+        return {"Services": services}
 
 
 class FakeLogs:
@@ -397,11 +457,14 @@ def test_aws_mode_log_group_without_trace_fails_a5(vc, monkeypatch, tmp_path):
 
 
 def test_aws_mode_zero_counter_increment_fails_a6(vc, monkeypatch, tmp_path):
+    """EMF delta semantics: buckets all 0.0 in the window == no increment."""
+    monkeypatch.setattr(vc, "POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(vc, "POLL_DEADLINE_S", 0.05)
     cloudwatch = FakeCloudWatch(
         _counter_metrics(),
         [
-            {"Timestamp": "2026-10-12T00:00:00Z", "Sum": 7.0},
-            {"Timestamp": "2026-10-12T00:01:00Z", "Sum": 7.0},
+            {"Timestamp": "2026-10-12T00:00:00Z", "Sum": 0.0},
+            {"Timestamp": "2026-10-12T00:01:00Z", "Sum": 0.0},
         ],
     )
     _wire_aws(vc, monkeypatch, cloudwatch=cloudwatch)
@@ -499,13 +562,196 @@ def test_aws_mode_series_over_limit_fails_a9(vc, monkeypatch, tmp_path):
 
 
 def test_aws_mode_structural_fallback_when_id_not_listed(vc, monkeypatch, tmp_path):
-    """R-03: if the converted id is not in the summaries, scan by structure."""
+    """R-03: if the converted id is not in the summaries, scan by structure.
+
+    The target sits in the THIRD chunk (>10 summaries) to pin the chunking
+    at BatchGetTraces' hard limit of 5 ids per call (live 2026-10-12: chunks
+    of 10 raised InvalidRequestException 'Exceeding maximum query size: 5').
+    """
     scanned = "1-99999999-000000000000000000000000"
-    xray = FakeXRay([scanned], {scanned: _happy_xray_docs(), CONVERTED: _happy_xray_docs()})
+    noise = [f"1-0000000{i}-00000000000000000000000{i}" for i in range(11)]
+    summaries = noise + [scanned]
+    xray = FakeXRay(summaries, {scanned: _happy_xray_docs(), CONVERTED: _happy_xray_docs()})
     _wire_aws(vc, monkeypatch, xray=xray)
     rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
     assert rc == 0
     assert _assertion(_read(json_path), 3)["estado"] == "PASS"
+    assert all(
+        len(chunk) <= 5
+        for chunk in _batch_chunks_from_calls(xray)
+    ), "BatchGetTraces no acepta mas de 5 ids por llamada"
+
+
+def _batch_chunks_from_calls(xray: FakeXRay) -> list[list[str]]:
+    """Recover the TraceIds of every batch_get_traces call (chunk sizes)."""
+    return xray.batch_chunks
+
+
+class _DelayedXRay(FakeXRay):
+    """X-Ray index visible only from the N-th GetTraceSummaries call.
+
+    Reproduces the live 2026-10-12 A3 failure: the trace was indexed ~1 min
+    after the POST, and the single-read version FAILed with trazas_ventana=0
+    while the same query minutes later returned the trace.
+    """
+
+    def __init__(self, *args: Any, visible_from_call: int = 2) -> None:
+        super().__init__(*args)
+        self._visible_from_call = visible_from_call
+        self._summary_calls = 0
+
+    def get_trace_summaries(self, **kwargs: Any) -> dict[str, Any]:
+        self._summary_calls += 1
+        if self._summary_calls < self._visible_from_call:
+            self.calls.append("get_trace_summaries")
+            self.summary_kwargs.append(kwargs)
+            return {"TraceSummaries": []}
+        return super().get_trace_summaries(**kwargs)
+
+
+def test_aws_mode_a3_polls_until_trace_indexed(vc, monkeypatch, tmp_path):
+    """A3/A4 must POLL X-Ray (30-90 s ingest lag), not trust a single read."""
+    monkeypatch.setattr(vc, "POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(vc, "POLL_DEADLINE_S", 5.0)
+    xray = _DelayedXRay([CONVERTED], {CONVERTED: _happy_xray_docs()}, visible_from_call=3)
+    _wire_aws(vc, monkeypatch, xray=xray)
+    rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
+    payload = _read(json_path)
+    assert xray.calls.count("get_trace_summaries") >= 3, (
+        "A3 debe reintentar GetTraceSummaries (lag de indexacion de X-Ray)"
+    )
+    assert _assertion(payload, 3)["estado"] == "PASS"
+    assert _assertion(payload, 4)["estado"] == "PASS"
+    assert rc == 0
+
+
+def test_aws_mode_a3_gives_up_after_deadline(vc, monkeypatch, tmp_path):
+    """If the trace never appears, A3 FAILs with the catalog intact (no hang)."""
+    monkeypatch.setattr(vc, "POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(vc, "POLL_DEADLINE_S", 0.05)
+    xray = _DelayedXRay([], {}, visible_from_call=10_000)
+    _wire_aws(vc, monkeypatch, xray=xray)
+    rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
+    payload = _read(json_path)
+    assert _assertion(payload, 3)["estado"] == "FAIL"
+    assert _assertion(payload, 3)["detalles"]["trazas_ventana"] == 0
+    assert len(payload["aserciones"]) == 13
+    assert rc == 1
+
+
+def test_find_orders_series_prefers_resource_dimensions(vc):
+    """Tras un cambio de config EMF conviven series antiguas (OTelLib) y nuevas
+    (service.name/cloud.provider/deployment.environment). A6/A7 deben usar la
+    serie con identidad de resource; si no existe ninguna, la primera."""
+
+    class TwoSeriesCW(FakeCloudWatch):
+        def list_metrics(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append("list_metrics")
+            return {
+                "Metrics": [
+                    {
+                        "Namespace": "OtelLab",
+                        "MetricName": "orders_created_total",
+                        "Dimensions": [{"Name": "OTelLib", "Value": "service-a"}],
+                    },
+                    {
+                        "Namespace": "OtelLab",
+                        "MetricName": "orders_created_total",
+                        "Dimensions": [
+                            {"Name": "service.name", "Value": "service-a"},
+                            {"Name": "cloud.provider", "Value": "aws"},
+                            {"Name": "deployment.environment", "Value": "lab"},
+                        ],
+                    },
+                ]
+            }
+
+    dims, n = vc._find_orders_series({"cloudwatch": TwoSeriesCW([], [])})
+    assert {"Name": "cloud.provider", "Value": "aws"} in dims
+    assert all(d["Name"] != "OTelLib" for d in dims)
+    assert n == 1  # una sola METRICA distinta (A9 cuenta metricas, no series)
+
+
+def _live_shape_xray_docs() -> list[dict[str, Any]]:
+    """Docs TAL CUAL los devuelve BatchGetTraces para el pipeline OTLP->X-Ray
+    (verificado en vivo 2026-10-12): el subsegmento cliente (httpx) NO se
+    lista, parent_id de service-b queda "colgando" de un id invisible, y las
+    llamadas a BD salen como segmentos inferidos Database::SQL con
+    sql.database_type; los atributos de resource viajan namespaced como
+    metadata.default["otel.resource.<key>"]."""
+    return [
+        {
+            "name": "service-a",
+            "id": SEG_A_ID,
+            "origin": "AWS::ECS::Fargate",
+            "metadata": {
+                "default": {
+                    "otel.resource.cloud.provider": "aws",
+                    "otel.resource.deployment.environment": "lab",
+                    "otel.resource.service.name": "service-a",
+                }
+            },
+        },
+        {
+            "name": "service-b",
+            "id": SEG_B_ID,
+            "parent_id": CLIENT_SPAN_ID,
+            "metadata": {
+                "default": {
+                    "otel.resource.cloud.provider": "aws",
+                    "otel.resource.deployment.environment": "lab",
+                    "otel.resource.service.name": "service-b",
+                }
+            },
+        },
+        {
+            "name": "inventory",
+            "id": "0eeace6f1cd4a849",
+            "parent_id": "59db02a2d850a0f0",
+            "inferred": True,
+            "origin": "Database::SQL",
+            "sql": {"database_type": "postgresql", "url": "connect"},
+        },
+    ]
+
+
+LIVE_GRAPH_EDGES = [
+    ("service-a", "service-b"),
+    ("service-a", "orders"),
+    ("service-b", "inventory"),
+]
+
+
+def test_aws_mode_a3_a4_graph_fallback_live_shape(vc, monkeypatch, tmp_path):
+    """A3/A4/A7 con la forma real de X-Ray: enlace por GetTraceGraph,
+    postgresql por sql.database_type + arista service-b->BD, y claves
+    otel.resource.* en el lado traza de A7."""
+    xray = FakeXRay(
+        [CONVERTED], {CONVERTED: _live_shape_xray_docs()}, graph_edges=LIVE_GRAPH_EDGES
+    )
+    _wire_aws(vc, monkeypatch, xray=xray)
+    rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
+    payload = _read(json_path)
+    assert _assertion(payload, 3)["estado"] == "PASS", payload
+    assert ["service-a", "service-b"] in _assertion(payload, 3)["detalles"]["aristas_grafo"]
+    assert _assertion(payload, 4)["estado"] == "PASS", payload
+    assert _assertion(payload, 7)["estado"] == "PASS", payload
+    assert "get_trace_graph" in xray.calls
+    assert rc == 0
+
+
+def test_aws_mode_a3_graph_link_fails_without_edge(vc, monkeypatch, tmp_path):
+    """Sin arista service-a->service-b en el grafo, A3 sigue FAIL honesto."""
+    xray = FakeXRay(
+        [CONVERTED],
+        {CONVERTED: _live_shape_xray_docs()},
+        graph_edges=[("service-a", "orders"), ("service-b", "inventory")],
+    )
+    _wire_aws(vc, monkeypatch, xray=xray)
+    rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
+    payload = _read(json_path)
+    assert _assertion(payload, 3)["estado"] == "FAIL"
+    assert rc == 1
 
 
 # ---------------------------------------------------------------------------
@@ -544,8 +790,13 @@ def test_next_page_kwargs_keep_start_end_time(vc):
             self.summary_kwargs.append(kwargs)
             self.calls.append("get_trace_summaries")
             if len(self.summary_kwargs) == 1:
-                return {"TraceSummaries": [{"TraceId": "1-a-b"}], "NextToken": "tok"}
-            return {"TraceSummaries": [{"TraceId": "1-c-d"}]}
+                # Forma real verificada en vivo 2026-10-12: la clave del id es
+                # "Id" (TraceIdSummary de botocore) y la PRIMERA pagina puede
+                # venir vacia con NextToken (indice sharddeado de X-Ray).
+                return {"TraceSummaries": [{"Id": "1-a-b"}], "NextToken": "tok"}
+            if len(self.summary_kwargs) == 2:
+                return {"TraceSummaries": [], "NextToken": "tok2"}
+            return {"TraceSummaries": [{"Id": "1-c-d"}]}
 
     xray = PagingXRay([], {})
     ids = vc.fetch_trace_summary_ids(xray, window=60)
