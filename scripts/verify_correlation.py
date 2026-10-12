@@ -6,7 +6,8 @@ signals, in each cloud it was asked to check:
 
 * ``--include-aws``  -> X-Ray (A3, A4), CloudWatch Logs (A5), CloudWatch
   metrics via EMF (A6), resource consistency across the three AWS signals
-  (A7), Prometheus exemplars scraped through the tunnel (A8) and the
+  (A7), Prometheus exemplars scraped from the collector's :8889 exporter
+  reached through the operator's temporary ingress (A8) and the
   cardinality limits (A9). AWS calls go through boto3 (lazy import: local
   mode and offline tests never need the SDK installed).
 * ``--include-gcp``  -> Cloud Trace (A10), Cloud Logging (A11), Cloud
@@ -106,8 +107,10 @@ MAX_SUMMARY_PAGES = 10
 MAX_STRUCTURAL_SCAN_TRACES = 30
 CUSTOM_METRICS_LIMIT = 10
 PROM_SERIES_LIMIT = 1500
-# Prometheus exporter of the collector, reachable through the SSM tunnel
-# (same URL the local compose stack exposes on :8889).
+# Prometheus exporter of the collector. SSM port-forwarding to a Fargate task
+# is NOT available (rejected live 2026-10-12), so the AWS run reaches it on the
+# task's public ENI IP (:8889) after `make aws-access-grant` — the default here
+# matches the local compose stack, which exposes the same port on localhost.
 DEFAULT_PROMETHEUS_URL = "http://localhost:8889/metrics"
 
 HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -365,14 +368,17 @@ def fetch_trace_summary_ids(xray_client: Any, window: int) -> list[str]:
     """All X-Ray trace ids seen in the last ``window`` seconds (bounded paging).
 
     Uses only ``GetTraceSummaries`` (free tier) with a hard page cap, never a
-    loop that could turn into a paid dashboard pattern.
+    loop that could turn into a paid dashboard pattern. The boto3 API takes
+    the window as top-level ``StartTime``/``EndTime`` datetimes — a
+    ``TimeRange`` dict is rejected with ParamValidationError (verified live
+    2026-10-12).
     """
     end = datetime.now(timezone.utc)
     start = end - timedelta(seconds=window)
     ids: list[str] = []
     token: str | None = None
     for _ in range(MAX_SUMMARY_PAGES):
-        params: dict[str, Any] = {"TimeRange": {"StartTime": start, "EndTime": end}}
+        params: dict[str, Any] = {"StartTime": start, "EndTime": end}
         if token:
             params["NextToken"] = token
         response = xray_client.get_trace_summaries(**params)
@@ -1112,6 +1118,12 @@ def run_aws_assertions(
     ``cloudwatch:GetMetricStatistics`` (never ``GetMetricData``) and
     ``cloudwatch:ListMetrics``. Shared fetches (trace summaries, the
     Prometheus scrape, ListMetrics) keep the call count bounded.
+
+    Each assertion block is INDEPENDENT: one API failing registers its rows
+    as FAIL with the API reason and lets the remaining assertions still run
+    and register — the evidence JSON must never lose catalog rows (lesson
+    from the live session of 2026-10-12, where an X-Ray ParamValidationError
+    made A5-A9 vanish).
     """
     ctx: dict[str, Any] = {"xray_trace_found": False, "cloudwatch_logs_found": False}
     try:
@@ -1131,39 +1143,42 @@ def run_aws_assertions(
         return ctx
 
     # --- A3 / A4: X-Ray by structure ---------------------------------------
+    # INDEPENDENT block: an X-Ray API error FAILs A3/A4 with the API reason
+    # but never swallows the A5-A9 rows (verified live 2026-10-12: the old
+    # early-return dropped them from the evidence JSON).
     summaries: list[str] = []
     docs: list[dict[str, Any]] = []
+    xray_id = w3c_to_xray_trace_id(trace_id)
+    xray_error: str | None = None
     try:
         summaries = fetch_trace_summary_ids(clients["xray"], args.window)
     except Exception as exc:  # boto3 raises many client/credential error types
-        reason = f"AWS API fallo (xray:GetTraceSummaries): {type(exc).__name__}: {exc}"
-        _fail_assertions(report, [3, 4], reason)
-        ctx["aws_error"] = reason
-        return ctx
+        xray_error = f"AWS API fallo (xray:GetTraceSummaries): {type(exc).__name__}: {exc}"
 
-    xray_id = w3c_to_xray_trace_id(trace_id)
-    try:
-        if xray_id in summaries:
-            docs = parse_trace_segments(clients["xray"].batch_get_traces(TraceIds=[xray_id]))
-            ctx["xray_trace_found"] = bool(docs)
-        else:
-            # Structural fallback (R-03): scan the window's traces for a
-            # service-a+service-b parent link instead of trusting the id.
-            for chunk_start in range(0, min(len(summaries), MAX_STRUCTURAL_SCAN_TRACES), 10):
-                chunk = summaries[chunk_start : chunk_start + 10]
-                candidate_docs = parse_trace_segments(
-                    clients["xray"].batch_get_traces(TraceIds=chunk)
-                )
-                ok, _details = xray_parent_link_ok(candidate_docs)
-                if ok:
-                    docs, ctx["xray_trace_found"] = candidate_docs, True
-                    break
-    except Exception as exc:
-        reason = f"AWS API fallo (xray:BatchGetTraces): {type(exc).__name__}: {exc}"
-        _fail_assertions(report, [3, 4], reason)
+    if xray_error is None:
+        try:
+            if xray_id in summaries:
+                docs = parse_trace_segments(clients["xray"].batch_get_traces(TraceIds=[xray_id]))
+                ctx["xray_trace_found"] = bool(docs)
+            else:
+                # Structural fallback (R-03): scan the window's traces for a
+                # service-a+service-b parent link instead of trusting the id.
+                for chunk_start in range(0, min(len(summaries), MAX_STRUCTURAL_SCAN_TRACES), 10):
+                    chunk = summaries[chunk_start : chunk_start + 10]
+                    candidate_docs = parse_trace_segments(
+                        clients["xray"].batch_get_traces(TraceIds=chunk)
+                    )
+                    ok, _details = xray_parent_link_ok(candidate_docs)
+                    if ok:
+                        docs, ctx["xray_trace_found"] = candidate_docs, True
+                        break
+        except Exception as exc:
+            xray_error = f"AWS API fallo (xray:BatchGetTraces): {type(exc).__name__}: {exc}"
 
-    already_failed = {r.id for r in report.results if r.id in (3, 4) and r.estado == FAIL}
-    if 3 not in already_failed:
+    if xray_error is not None:
+        report.register(3, FAIL, razon=xray_error)
+        report.register(4, FAIL, razon=xray_error)
+    else:
         ok, details = xray_parent_link_ok(docs)
         details_out = {**details, "xray_trace_id_buscado": xray_id, "trazas_ventana": len(summaries)}
         if not docs:
@@ -1180,7 +1195,6 @@ def run_aws_assertions(
                 razon="la traza en X-Ray no cumple el enlace parent_id service-a -> service-b",
                 detalles=details_out,
             )
-    if 4 not in already_failed:
         b_docs = [d for d in docs if d.get("name") == "service-b"]
         b_child_ids = service_segment_ids(docs)["service-b"]
         b_all = [d for d in docs if d.get("id") in b_child_ids or d.get("name") == "service-b"]
@@ -1203,15 +1217,18 @@ def run_aws_assertions(
             )
 
     # --- A5 / A7 input: CloudWatch Logs (exporter groups) -------------------
+    # INDEPENDENT block: a logs API error FAILs A5 only; A6-A9 keep running.
     log_payloads: dict[str, list[dict[str, Any]]] = {}
+    logs_error: str | None = None
     try:
         log_payloads = _fetch_exporter_logs(clients["logs"], trace_id, args.window)
         ctx["cloudwatch_logs_found"] = bool(log_payloads)
     except Exception as exc:
-        reason = f"AWS API fallo (logs:FilterLogEvents): {type(exc).__name__}: {exc}"
-        report.register(5, FAIL, razon=reason)
+        logs_error = f"AWS API fallo (logs:FilterLogEvents): {type(exc).__name__}: {exc}"
 
-    if 5 not in {r.id for r in report.results if r.estado == FAIL}:
+    if logs_error is not None:
+        report.register(5, FAIL, razon=logs_error)
+    else:
         services_found = sorted(log_payloads)
         if set(services_found) >= set(CORRELATION_SERVICES):
             report.register(
@@ -1294,15 +1311,22 @@ def run_aws_assertions(
         report.register(6, FAIL, razon=metric_error)
 
     # --- A7: resource consistency trace / log / metric ----------------------
-    _check_resource_consistency(report, docs, log_payloads, counter_dims)
+    # INDEPENDENT block: whatever the upstream blocks could not fetch simply
+    # shows as a gap; an unexpected crash still registers the row.
+    try:
+        _check_resource_consistency(report, docs, log_payloads, counter_dims)
+    except Exception as exc:
+        report.register(
+            7, FAIL, razon=f"comprobacion A7 no evaluable ({type(exc).__name__}): {exc}"
+        )
 
-    # --- A8 / A9: Prometheus scrape (tunnel :8889) --------------------------
+    # --- A8 / A9: Prometheus scrape (:8889 via public ENI after grant) ------
     scrape_text: str | None = None
     scrape_error: str | None = None
     try:
         _status, _headers, body = http_request("GET", args.prometheus_url)
         scrape_text = body if isinstance(body, str) else json.dumps(body)
-    except API_ERRORS as exc:  # urllib + HttpError: the tunnel is the operator's job
+    except API_ERRORS as exc:  # urllib + HttpError: reaching it is the operator's job
         scrape_error = f"scrape Prometheus fallo ({args.prometheus_url}): {exc}"
 
     series_count = 0
@@ -1462,6 +1486,23 @@ def _run_gcp_check(
         return False
 
 
+def _ensure_catalog_rows(report: CorrelationReport) -> None:
+    """Contract: the evidence JSON always carries the 13 catalog rows.
+
+    Any assertion that finished without registering (unexpected crash in one
+    block, early return, …) is recorded as FAIL with the honest reason
+    "no evaluada" — catalog rows are never silently dropped (the live run of
+    2026-10-12 lost A5-A9 exactly this way).
+    """
+    registered = {r.id for r in report.results}
+    for assertion_id, _nombre, _obligatoria in ASSERTION_CATALOG:
+        if assertion_id not in registered:
+            report.register(
+                assertion_id, FAIL,
+                razon="asercion no evaluada (el bloque no registro su fila)",
+            )
+
+
 def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
     """Execute the whole catalog once and return the report + injected id."""
     report = CorrelationReport()
@@ -1499,6 +1540,7 @@ def run_assertions(args: argparse.Namespace) -> tuple[CorrelationReport, str]:
         report, args.include_aws, args.include_gcp, aws_ctx,
         gcp_token, args.project, trace_id,
     )
+    _ensure_catalog_rows(report)
     return report, trace_id
 
 
@@ -1555,7 +1597,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--prometheus-url", default=DEFAULT_PROMETHEUS_URL,
-        help="collector Prometheus scrape endpoint (through the tunnel for the AWS run)",
+        help="collector Prometheus scrape endpoint (task public ENI :8889 after aws-access-grant for the AWS run)",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help="GCP project id")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW_SECONDS, help="read window in seconds")

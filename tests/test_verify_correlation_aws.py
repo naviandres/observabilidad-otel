@@ -202,9 +202,11 @@ class FakeXRay:
         self.summaries = summaries
         self.traces = traces
         self.calls: list[str] = []
+        self.summary_kwargs: list[dict[str, Any]] = []
 
     def get_trace_summaries(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append("get_trace_summaries")
+        self.summary_kwargs.append(kwargs)
         return {"TraceSummaries": [{"TraceId": t} for t in self.summaries]}
 
     def batch_get_traces(self, TraceIds: list[str]) -> dict[str, Any]:
@@ -504,6 +506,98 @@ def test_aws_mode_structural_fallback_when_id_not_listed(vc, monkeypatch, tmp_pa
     rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
     assert rc == 0
     assert _assertion(_read(json_path), 3)["estado"] == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# Live-session regressions (2026-10-12): boto3 kwargs + catalog completeness
+# ---------------------------------------------------------------------------
+
+
+def test_get_trace_summaries_kwargs_start_end_time_not_timerange(vc):
+    """boto3 GetTraceSummaries takes top-level StartTime/EndTime datetimes.
+
+    The live call failed with ParamValidationError when the window was sent
+    as a nested ``TimeRange`` dict; this pins the exact kwargs the client
+    must receive.
+    """
+    from datetime import datetime
+
+    xray = FakeXRay([], {})
+    ids = vc.fetch_trace_summary_ids(xray, window=120)
+    assert ids == []
+    assert len(xray.summary_kwargs) == 1
+    kwargs = xray.summary_kwargs[0]
+    assert "TimeRange" not in kwargs, "GetTraceSummaries rechaza TimeRange (ParamValidationError)"
+    assert "StartTime" in kwargs and "EndTime" in kwargs
+    assert isinstance(kwargs["StartTime"], datetime)
+    assert isinstance(kwargs["EndTime"], datetime)
+    assert kwargs["EndTime"] > kwargs["StartTime"]
+    # window respected: end - start == requested seconds
+    delta = (kwargs["EndTime"] - kwargs["StartTime"]).total_seconds()
+    assert delta == pytest.approx(120.0)
+
+
+def test_next_page_kwargs_keep_start_end_time(vc):
+    """Paging adds NextToken but keeps the StartTime/EndTime shape."""
+    class PagingXRay(FakeXRay):
+        def get_trace_summaries(self, **kwargs: Any) -> dict[str, Any]:
+            self.summary_kwargs.append(kwargs)
+            self.calls.append("get_trace_summaries")
+            if len(self.summary_kwargs) == 1:
+                return {"TraceSummaries": [{"TraceId": "1-a-b"}], "NextToken": "tok"}
+            return {"TraceSummaries": [{"TraceId": "1-c-d"}]}
+
+    xray = PagingXRay([], {})
+    ids = vc.fetch_trace_summary_ids(xray, window=60)
+    assert ids == ["1-a-b", "1-c-d"]
+    assert xray.summary_kwargs[1]["NextToken"] == "tok"
+    assert "StartTime" in xray.summary_kwargs[1] and "TimeRange" not in xray.summary_kwargs[1]
+
+
+class _BrokenXRay(FakeXRay):
+    """get_trace_summaries raises exactly like the live ParamValidationError."""
+
+    def get_trace_summaries(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append("get_trace_summaries")
+        raise RuntimeError("Parameter validation failed: Missing StartTime/EndTime")
+
+
+def test_xray_api_error_keeps_rows_5_to_9_registered(vc, monkeypatch, tmp_path):
+    """A3/A4 API failure FAILs those rows but must NOT drop A5-A9 (live bug)."""
+    # summaries are unreachable (get_trace_summaries raises), but the traces
+    # themselves are fetchable so A8's exemplar check can still verify X-Ray.
+    _wire_aws(vc, monkeypatch, xray=_BrokenXRay([], {CONVERTED: _happy_xray_docs()}))
+    rc, json_path = _run_aws_main(vc, monkeypatch, tmp_path, extra_args=["--include-aws"])
+    payload = _read(json_path)
+    assert sorted(a["id"] for a in payload["aserciones"]) == list(range(1, 14))
+    assert len(payload["aserciones"]) == 13
+    assert _assertion(payload, 3)["estado"] == "FAIL"
+    assert "xray" in _assertion(payload, 3)["razon"]
+    assert _assertion(payload, 4)["estado"] == "FAIL"
+    # the remaining AWS assertions still ran against the healthy fakes:
+    for assertion_id in (5, 6, 8, 9):
+        assert _assertion(payload, assertion_id)["estado"] == "PASS", payload
+    assert rc == 1
+
+
+def test_all_boto_clients_down_payload_still_has_13_rows(vc, monkeypatch, tmp_path):
+    """Contract: every catalog row is present even when ALL boto clients fail."""
+
+    def boom(service: str, profile: str, region: str) -> Any:
+        raise RuntimeError(f"no credentials for {service}")
+
+    monkeypatch.setattr(vc, "generate_traceparent", lambda: (FIXED_TRACEPARENT, FIXED_TRACE_ID))
+    monkeypatch.setattr(vc, "make_aws_client", boom)
+    monkeypatch.setattr(vc, "http_request", _transport_with_scrape(vc))
+    rc = vc.main(
+        ["--endpoint", "http://fake:8000", "--out-dir", str(tmp_path), "--include-aws"]
+    )
+    payload = _read(tmp_path / "03-correlation.json")
+    assert sorted(a["id"] for a in payload["aserciones"]) == list(range(1, 14))
+    assert len(payload["aserciones"]) == 13
+    for assertion_id in range(3, 10):
+        assert _assertion(payload, assertion_id)["estado"] == "FAIL"
+    assert rc == 1
 
 
 # ---------------------------------------------------------------------------
