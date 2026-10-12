@@ -10,6 +10,11 @@ the A/B benchmark honest: same binary, flag on/off.
 ``log_exporter`` arguments so tests can wire in-memory exporters without
 touching the network.
 
+Head sampling is configurable through the standard ``OTEL_TRACES_SAMPLER`` /
+``OTEL_TRACES_SAMPLER_ARG`` env vars (see ``_build_sampler``); unset keeps the
+SDK default. The overhead benchmark needs ``parentbased_traceidratio`` at
+0.25 / 1.0 / 0.0 (PLAN §4.A) and the SDK does not read those vars on its own.
+
 Logs travel on two paths (PLAN §1 anticipated ``opentelemetry-instrumentation-
 logging``; wired directly on the SDK here): stdout keeps the structlog JSON
 line for the platform log driver / GKE filelog, and the OTLP ``LoggingHandler``
@@ -35,7 +40,7 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import MetricReader, PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import TracerProvider, sampling as trace_sampling
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
 DEFAULT_OTLP_ENDPOINT = "http://otel-collector:4317"
@@ -66,6 +71,48 @@ def _build_resource(service_name: str) -> Resource:
             ),
         }
     )
+
+
+def _build_sampler() -> Optional[trace_sampling.Sampler]:
+    """Return the sampler configured by the standard OTel env vars.
+
+    ``OTEL_TRACES_SAMPLER`` selects the sampler by its canonical name and
+    ``OTEL_TRACES_SAMPLER_ARG`` provides its numeric argument (ratio for the
+    ``*_traceidratio`` samplers). When ``OTEL_TRACES_SAMPLER`` is unset the
+    SDK default (ParentBased(AlwaysOn)) is kept, so development and the
+    correlation test are unaffected. The overhead benchmark (PLAN §4.A) sets
+    ``parentbased_traceidratio`` with arg ``0.25`` for the measured runs and
+    ``1.0`` / ``0.0`` for the generation-vs-export attribution runs.
+
+    Supported names: ``always_on``, ``always_off``, ``traceidratio``,
+    ``parentbased_always_on``, ``parentbased_always_off``,
+    ``parentbased_traceidratio``.
+    """
+    name = os.getenv("OTEL_TRACES_SAMPLER", "").strip().lower()
+    if not name:
+        return None
+    raw_arg = os.getenv("OTEL_TRACES_SAMPLER_ARG", "").strip()
+    if name in {"always_on", "parentbased_always_on"}:
+        leaf: trace_sampling.Sampler = trace_sampling.AlwaysOn()
+    elif name in {"always_off", "parentbased_always_off"}:
+        leaf = trace_sampling.AlwaysOff()
+    elif name in {"traceidratio", "parentbased_traceidratio"}:
+        try:
+            ratio = float(raw_arg) if raw_arg else 1.0
+        except ValueError as exc:
+            raise ValueError(
+                f"OTEL_TRACES_SAMPLER_ARG must be a number, got {raw_arg!r}"
+            ) from exc
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError(
+                f"OTEL_TRACES_SAMPLER_ARG must be within [0, 1], got {ratio!r}"
+            )
+        leaf = trace_sampling.TraceIdRatioBased(ratio)
+    else:
+        raise ValueError(f"Unsupported OTEL_TRACES_SAMPLER={name!r}")
+    if name.startswith("parentbased_"):
+        return trace_sampling.ParentBased(leaf)
+    return leaf
 
 
 def _add_trace_context(
@@ -147,7 +194,7 @@ def configure_logging(service_name: str, level: int = logging.INFO) -> logging.L
 def _build_tracer_provider(
     resource: Resource, span_exporter: Optional[SpanExporter]
 ) -> TracerProvider:
-    provider = TracerProvider(resource=resource)
+    provider = TracerProvider(resource=resource, sampler=_build_sampler())
     exporter = span_exporter or OTLPSpanExporter(
         endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", DEFAULT_OTLP_ENDPOINT),
         insecure=True,
