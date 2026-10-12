@@ -85,6 +85,78 @@ uvicorn app.main:app --app-dir service-b --host 0.0.0.0 --port 8001
 Docs de API: <http://localhost:8000/docs>. Métricas de proceso:
 <http://localhost:8000/metrics> y <http://localhost:8001/metrics>.
 
+## Despliegue en AWS (ECS Fargate)
+
+La misma aplicación sobre **ECS Fargate** con el **Collector ADOT**: las 4
+señales van a X-Ray (trazas), CloudWatch Logs (logs), CloudWatch EMF
+(métricas) y un **CloudWatch Agent** sidecar (métricas de infraestructura ECS).
+Igual que en GKE: sin ALB, sin ingress público — el acceso es por **túnel SSM
+(`ECS Exec`)** al puerto localhost del contenedor.
+
+### Requisitos
+
+- `aws` CLI con perfil `otel-lab` (credenciales en `~/.aws/`, nunca en el repo),
+  `docker`, `make` y el `session-manager-plugin` (AWS SSM Session Manager → ECS
+  Exec, necesario para `make tunnel`).
+- Creados **una sola vez por el humano** (este lab no tiene IAM de autómata):
+  - Repos **ECR** `otel-lab/service-a`, `otel-lab/service-b` y
+    `otel-lab/otel-collector`.
+  - Roles **`otel-lab-exec-ecs`** (execution: ECR pull + logs) y
+    **`otel-lab-task-ecs`** (task: X-Ray, CloudWatch y acceso SSM).
+  - Parámetro **SSM** `/otel-lab/cloudwatch-agent/config` (config JSON del
+    CloudWatch agent) y bucket S3 para el state (`scripts/guard_cost.py`).
+- Imagen pública fijada del collector ADOT:
+  `public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0` (tag fijo).
+
+### Ciclo de vida
+
+| # | Comando | Qué hace |
+|---|---|---|
+| 1 | `make validate-collector` | valida offline el YAML ADOT del modo AWS (arranca el binario localmente, sin coste) |
+| 2 | `make aws-push` | login ECR + build/push de `service-a`, `service-b` y el **collector ADOT** con el YAML AWS horneado (tag `$(IMAGE_TAG)`, nunca `:latest`) |
+| 3 | `make aws-start` | red (VPC + subnet pública + IGW, sin NAT) + cluster + task definition (render del template) + service FARGATE `desired_count=1` con `assignPublicIp` efímero y ECS Exec |
+| 4 | `make tunnel` | port-forwarding **sin ingress público**: `service-a:8000`, `service-b:8001`, collector `4317` (vía debug) |
+| 5 | `make aws-stop` | `desired_count=0`: la task Fargate deja de facturar (idempotente) |
+| 6 | `make aws-destroy` | botón nuclear: borra service + cluster y **verifica** que no queda nada activo |
+| 7 | `make aws-net-destroy` | borra la red tagueada (VPC, subnet, IGW, route table, SG) y comprueba que no quedan dependencias |
+
+Como no hay ALB, el "backend" equivalente de cada servicio es **local** al
+túnel (comparar con la tabla de backends de GKE):
+
+| Ruta en la consola de AWS | Backend (CLI) |
+|---|---|
+| CloudWatch Logs → ECS | `aws logs tail /otel/labs/ecs-platform/<contenedor>` (grupos `service-a`, `service-b`, `postgres`, `otel-collector`, `cloudwatch-agent`) |
+| X-Ray → Traces | trazas `service-a`/`service-b` correlacionadas por `trace_id` |
+| CloudWatch → Métricas (EMF + agent) | dashboard **OTel Lab — AWS ECS** creado en la Fase 5 |
+| ECS Exec → consola del contenedor | `make tunnel` + navegador local (http://localhost:8000 ← service-a) |
+
+### Smoke en AWS
+
+```powershell
+make tunnel
+
+# en otra terminal — el mismo smoke que local/GKE
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/orders `
+  -ContentType 'application/json' `
+  -Body '{"items":[{"sku":"LAPTOP-001","quantity":1,"unit_price":2500000}]}'
+```
+
+`200` = orden creada. Dónde ver las señales:
+
+| Señal | Dónde |
+|---|---|
+| Trazas | **X-Ray** → consola (buscar el `trace_id` del log de la orden) |
+| Logs | **CloudWatch Logs** → grupos `/otel/labs/ecs-platform/*` |
+| Métricas | **CloudWatch** → el agente emite métricas ECS (`CpuUtilized`, `MemoryUtilized`…) con EMF del collector |
+
+### Coste y teardown
+
+Fargate factura por segundo mientras `desired_count=1`. **`make aws-stop`** lo
+apaga sin borrar nada (vuelve a encenderse con `aws-start`, la red y la task
+definition persisten). El botón nuclear es **`make aws-destroy`** + opcional
+`make aws-net-destroy`. `scripts/guard_cost.py` vigila el coste acumulado del
+proyecto (presupuesto $100 de AWS, PLAN §3.5) con el state en S3.
+
 ## Despliegue en GCP (GKE)
 
 Modo nube del mismo pipeline sobre **GKE Standard** (node pool spot):

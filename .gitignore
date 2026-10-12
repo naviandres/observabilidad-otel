@@ -43,3 +43,7 @@ docs/evidence/*.txt
 # Excepción: 00-credentials.txt lleva identidades/tokens ENMASCARADOS y sí se versiona
 # (runbook A.3/B.0). El patrón *.txt de arriba la excluiría; esta línea la re-incluye.
 !docs/evidence/00-credentials.txt
+
+# Render efímero de la task definition (lo genera `make aws-start` con `sed`); el
+# template con tokens (deploy/aws/task-definition.json) es el que se versiona.
+deploy/aws/task-definition.rendered.json

@@ -1,0 +1,4 @@
+date,task,action,timestamp_utc,hours,vcpu,memory_gb,rate_usd_per_hour,subtotal_usd,notes
+2026-10-12,106622a2f315417d972d5ac7cc7c44e3,start,2026-10-12T03:25:00Z,,1,2,,,task Fargate otel-lab revision 6 RUNNING (5 contenedores; cw-agent exit 1 non-essential)
+2026-10-12,106622a2f315417d972d5ac7cc7c44e3,stop,2026-10-12T03:57:00Z,,1,2,,,desired_count=0 y delete del service; teardown verificado list-clusters vacio
+2026-10-12,106622a2f315417d972d5ac7cc7c44e3,summary,2026-10-12T03:25:00Z/2026-10-12T03:57:00Z,0.55,1,2,0.04928,0.027,"uptime ~35 min = 0.55h; tarifa Fargate us-east-1 1 vCPU ($0.04038/h) + 2 GB ($0.00445/GB-h) = $0.04928/h -> ~$0.027 USD; estimacion inicial $0.022 usaba solo la tarifa vCPU (0.0405/h) sin memoria; Cost Explorer 2026-10-11/13 = $0 (lag ~24h) dentro de creditos"
