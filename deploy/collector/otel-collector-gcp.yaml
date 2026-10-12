@@ -34,27 +34,27 @@ receivers:
         endpoint: 0.0.0.0:4318
   # PLAN §2.A/C5: scrape the collector's own telemetry on 127.0.0.1:8888 so
   # self-metrics are re-exported on :8889 — read from the local scrape, never
-  # from the Cloud Monitoring metrics API (ADR-005).
+  # from the Cloud Monitoring metrics API (ADR-005). Ronda 6 (A12): 60s para
+  # no violar el periodo de muestreo de GCM (1 punto por serie por batch).
   prometheus:
     config:
       scrape_configs:
         - job_name: otel-collector
-          scrape_interval: 15s
+          scrape_interval: 60s
           static_configs:
             - targets: ["127.0.0.1:8888"]
   # PLAN §2.A-GCP: node/pod infra metrics (cpu, memory, processes) -> Cloud
   # Monitoring. There is no cloudwatch-agent sidecar in GCP; the collector
-  # itself covers infra metrics (§2.B-GCP).
+  # itself covers infra metrics (§2.B-GCP). Ronda 6: 60s por el mismo motivo.
   hostmetrics:
-    collection_interval: 30s
+    collection_interval: 60s
     scrapers:
       cpu:
       memory:
       processes:
-  # Fuente del pipeline de logs. La app emite structlog JSON a stdout
-  # (el SDK no exporta logs por OTLP; PLAN §1 L454 preveia
-  # opentelemetry-instrumentation-logging y no se cableo durante la
-  # instrumentacion). El collector
+  # Fuente del pipeline de logs. La app emite structlog JSON a stdout Y exporta
+  # logs por OTLP (telemetry.py LoggingHandler, A11); filelog es la pata de
+  # respaldo del platform log (stdout del nodo). El collector
   # lee el stdout de los pods del NODO (cluster single-node) y lo sube a Cloud
   # Logging con el trace_id normalizado en logging.googleapis.com/trace
   # (checklist §2.C). log_name dedicado (otel-app-logs) para NO pisar el
@@ -67,28 +67,34 @@ receivers:
     start_at: end
     operators:
       # Linea CRI de containerd: "<ts> <stream> <flags> <message>".
-      # contrib 0.162.0 exige prefijo en parse_from: la salida del regex va
-      # al body (default parse_to), de ahi body.<campo> en los sub-parsers.
+      # contrib 0.162.0: regex_parser vierte los capture groups en ATTRIBUTES
+      # (parse_to default), NO en body — la revision anterior usaba parse_from
+      # body.* y por eso TODO el chain fallaba (timestamp/json/trace/severity)
+      # y el fileconsumer registraba "failed to emit token" lote a lote (Ronda
+      # 6, 2026-10-12). on_error: send en cada operador para que una linea
+      # no-JSON (uvicorn texto plano) NUNCA descarte el lote: entra cruda.
       - type: regex_parser
         regex: '^(?P<log_timestamp>\S+) (?P<log_stream>\S+) (?P<log_flags>\S+) (?P<message>.*)$'
+        on_error: send
         timestamp:
-          parse_from: body.log_timestamp
+          parse_from: attributes.log_timestamp
           layout_type: strptime
           layout: '%Y-%m-%dT%H:%M:%S.%fZ'
-      # El message es JSON structlog -> los campos pasan a attributes (parse_to),
-      # dejando el body como el mensaje original.
+      # El message es JSON structlog -> los campos pasan a attributes, dejando
+      # el body como la linea original. Lineas de texto plano fallan el parse
+      # y siguen tal cual (on_error: send).
       - type: json_parser
-        parse_from: body.message
+        parse_from: attributes.message
         parse_to: attributes
-      # trace_id/span_id hex de structlog -> campos de traza del registro;
-      # el transform/logs los convierte en logging.googleapis.com/trace.
-      - type: trace_parser
-        trace_parser:
-          parse_from: attributes.trace_id
-        span_parser:
-          parse_from: attributes.span_id
+        on_error: send
+      # trace_id/span_id: el operador trace_parser de stanza 0.162.0 resulta
+      # ser un NO-OP silencioso (verificado en vivo y con el binario local:
+      # lee el campo pero nunca setea TraceID del record). La extraccion se
+      # hace en transform/logs via OTTL set(trace_id.string, ...), que si
+      # funciona. Aqui solo quedan los parsers que aportan (severity).
       - type: severity_parser
         parse_from: attributes.level
+        on_error: send
 
 processors:
   # PLAN §2.A: memory_limiter FIRST — without it a traffic spike OOM-kills the
@@ -126,12 +132,19 @@ processors:
         statements:
           - set(severity_text, attributes["log.severity"]) where attributes["log.severity"] != nil
           - delete_key(attributes, "log.severity") where attributes["log.severity"] != nil
-          # filelog path: structlog JSON fields live in the body map.
-          - set(severity_text, body["level"]) where body["level"] != nil
-          - set(severity_number, SEVERITY_NUMBER_INFO) where body["level"] == "info"
-          - set(severity_number, SEVERITY_NUMBER_WARN) where body["level"] == "warning"
-          - set(severity_number, SEVERITY_NUMBER_ERROR) where body["level"] == "error"
-          - set(severity_number, SEVERITY_NUMBER_DEBUG) where body["level"] == "debug"
+          # filelog path: trace_id/span_id hex en attributes (json_parser) ->
+          # campos de traza del record. Sustituye al trace_parser de stanza
+          # 0.162.0, que es un no-op silencioso (verificado con el binario).
+          # Las entradas OTLP ya traen trace context del LoggingHandler y no
+          # tienen attributes["trace_id"], asi que estas sentencias no las tocan.
+          - set(trace_id.string, attributes["trace_id"]) where attributes["trace_id"] != nil
+          - set(span_id.string, attributes["span_id"]) where attributes["span_id"] != nil
+          # Ronda 6: las sentencias de severidad que indexaban el body se
+          # eliminaron — el body de filelog es Str (la linea CRI completa) y el
+          # de OTLP tambien (el mensaje del LoggingHandler); indexar un Str
+          # producía warnings OTTL "log bodies of type Str cannot be indexed"
+          # en cada lote. La severidad ya viene del severity_parser (filelog)
+          # o del LoggingHandler (OTLP).
           - set(body, Concat([body], "")) where IsString(body) == false
           - set(resource.attributes["logging.googleapis.com/trace"], Concat(["projects/${env:GCP_PROJECT_ID}/traces/", trace_id], "")) where trace_id != ""
   # PLAN §2.A: strip PII (card*, email, authorization) — cost + security.
@@ -151,6 +164,15 @@ processors:
     send_batch_size: 1024
     send_batch_max_size: 2048
     timeout: 5s
+  # Ronda 6 (A12): Cloud Monitoring/GMP rechaza escrituras mas frecuentes que
+  # su periodo de muestreo (60s). El batch de 5s en el pipeline metrics causaba
+  # FailedPrecondition "written more frequently than the maximum sampling
+  # period" y drops de lotes enteros (el contador orders_created_total se iba
+  # con ellos). Este batch dedicado solo espera al timeout: sin umbral de
+  # tamano que provoque un flush antes de los 60s. El pipeline metrics usa
+  # ESTE batch; traces/logs mantienen el de 5s.
+  batch/metrics:
+    timeout: 60s
 
 extensions:
   # PLAN §2.A: health_check :13133 + pprof 127.0.0.1:1777 (never exposed).
@@ -217,7 +239,10 @@ service:
       exporters: ["${env:OTEL_TRACES_EXPORTER:-googlecloud}", otlphttp/jaeger-gcp]
     metrics:
       receivers: [otlp, prometheus, hostmetrics]
-      processors: [memory_limiter, resourcedetection, resource, batch]
+      # batch/metrics (timeout 60s) en lugar del batch de 5s: ver comentario
+      # del processor — evita los drops "more frequently than the maximum
+      # sampling period" de Cloud Monitoring (A12).
+      processors: [memory_limiter, resourcedetection, resource, batch/metrics]
       exporters: [googlecloud, googlemanagedprometheus, prometheus]
     logs:
       receivers: [otlp, filelog]
