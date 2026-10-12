@@ -159,12 +159,17 @@ def _build_tracer_provider(
 def _build_meter_provider(
     resource: Resource, metric_reader: Optional[MetricReader]
 ) -> MeterProvider:
+    # Ronda 6 (A12): Cloud Monitoring/GMP solo aceptan escrituras de cada
+    # metric-type cada 60 s, asi que el reader de GKE exporta a ese ritmo via
+    # OTEL_METRIC_EXPORT_INTERVAL (ms, nombre canonico del SDK; helm lo fija en
+    # 60000). Sin la variable el default sigue siendo 5 s — el pipeline EMF de
+    # AWS (CloudWatch) si acepta escrituras cada 5 s.
     reader = metric_reader or PeriodicExportingMetricReader(
         OTLPMetricExporter(
             endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", DEFAULT_OTLP_ENDPOINT),
             insecure=True,
         ),
-        export_interval_millis=5000,
+        export_interval_millis=int(os.getenv("OTEL_METRIC_EXPORT_INTERVAL", "5000")),
     )
     return MeterProvider(resource=resource, metric_readers=[reader])
 

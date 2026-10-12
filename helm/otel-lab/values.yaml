@@ -61,6 +61,15 @@ secrets:
     # (aqui via add-on --enable-secret-manager). Sin driver, los pods quedan
     # en ContainerCreating.
 
+metrics:
+  # Ronda 6 (A12): periodo de export de metricas de los services hacia el
+  # collector. Cloud Monitoring/GMP solo acepta una escritura por metric-type
+  # cada 60 s (periodo de muestreo); con el reader a 5 s los lotes del
+  # exporter googlecloud fallaban enteros (FailedPrecondition "written more
+  # frequently than the maximum sampling period") y orders_created_total no
+  # incrementaba. telemetry.py lee este valor via OTEL_METRIC_EXPORT_INTERVAL.
+  exportIntervalMillis: 60000
+
 collector:
   image:
     # contrib oficial pinneado, mismo tag que docker-compose.yml (PLAN §2.C:

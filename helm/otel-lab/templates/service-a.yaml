@@ -38,6 +38,12 @@ spec:
               value: "service-a"
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "service.name=service-a"
+            # Ronda 6 (A12): Cloud Monitoring/GMP solo acepta escrituras de un
+            # metric-type cada 60 s; el reader OTel del service exporta a ese
+            # ritmo (telemetry.py respeta esta variable; AWS no la fija y sigue
+            # a 5 s para EMF).
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.metrics.exportIntervalMillis | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.serviceA.containerPort }}
