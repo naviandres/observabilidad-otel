@@ -101,10 +101,15 @@ GKE/LB vacíos (`docs/evidence/instance-hours.csv`, `cluster-hours.csv`).
 
 La sesión costó **~$2.22 USD** (Fargate ~$0.62 según `instance-hours.csv` L19 + GKE
 ~$1.6 según `cluster-hours.csv` L15), **por encima del criterio de aceptación
-"coste de sesión <1 USD"**. Qué subió: la pausa de ~9.2 h con nubes encendidas, el
-re-deploy de GKE por el add-on CSI post-create (`UPDATE_CLUSTER` 05:06-05:13Z), el
-node pool e2-medium de 3 nodos (autoscaling 0-3), las 2 tareas Fargate sucesivas
-(rev 12→13) y el LB regional ~3 h. Qué recortaría la próxima: CSI habilitado en el
-create, pool único desde el día 1 y desired=0 durante los fixes largos. No es
-arreglable retroactivamente: es disclosure para que la confirmación humana
-testing→done sea informada.
+"coste de sesión <1 USD"**. Qué subió: el driver dominante fue la pausa de ~9.2 h
+con nubes encendidas, que facturó el fee del plano GKE ($0.10/h) y la task Fargate
+corriendo; en segundo término, las 2 tareas Fargate sucesivas (rev 12→13), el node
+pool e2-medium (autoscaling 0-3, promedio ~1 nodo sobre 14.2 h, ~$0.17) y el LB
+regional (~14 h: nace con gcp-expose tras el create y muere con el cluster 19:11Z;
+coste <$0.01). El add-on CSI se habilitó EN EL CREATE (`cluster-hours.csv` L13), no
+post-create. Qué recortaría la próxima: DELETE del cluster GKE (`gcp-destroy`) entre
+bloques de trabajo — la lección literal del registro: "leccion: apagar (delete) entre
+bloques, gcp-stop (resize 0) NO detiene el fee del plano" (`cluster-hours.csv` L15):
+gcp-stop escala los nodos a 0 pero deja corriendo el fee $0.10/h, que es el grueso
+del coste GKE. No es arreglable retroactivamente: es disclosure para que la
+confirmación humana testing→done sea informada.
