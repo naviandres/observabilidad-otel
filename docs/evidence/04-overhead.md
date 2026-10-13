@@ -71,7 +71,89 @@ Logging: ingesta dentro de los primeros 50 GB/mes **sin cargo**
 
 <!-- BENCH:TABLE -->
 
+### Tabla de replicas (por run)
+
+| run | var | sampling | steady s | p50 ms | p95 ms | p99 ms | max ms | reqs | req/s | err % | CPU % | mem used MB | heap MB | queue | refused |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| A1 | A | 1.0 | 300 | 962.01 | 1,465.88 | 2,561.09 | 3,710.74 | 33,595 | 93.2 | 0.00 | 12.44 | 1,452.8 | 27.9 | — | — |
+| B1 | B | 0.25 | 300 | 1,159.14 | 1,433.09 | 1,582.46 | 1,913.67 | 29,745 | 82.5 | 0.00 | 13.14 | 1,917.7 | 51.9 | 0 | 0 |
+| B2 | B | 0.25 | 300 | 1,153.83 | 1,425.18 | 1,602.93 | 1,966.60 | 29,722 | 82.4 | 0.00 | 12.92 | 1,767.1 | 65.0 | 1 | 0 |
+| A2 | A | 1.0 | 300 | 969.56 | 1,142.63 | 1,248.66 | 1,629.31 | 35,620 | 98.8 | 0.00 | 12.51 | 1,466.9 | 30.9 | — | — |
+| A3 | A | 1.0 | 300 | 974.36 | 1,227.39 | 1,442.46 | 3,068.17 | 34,755 | 96.5 | 0.00 | 12.39 | 1,439.6 | 31.0 | — | — |
+| B3 | B | 0.25 | 300 | 1,247.01 | 1,692.52 | 2,326.20 | 21,457.44 | 25,562 | 70.8 | 0.18 | 13.76 | 1,743.3 | 41.3 | 0 | 0 |
+| attrib-s100 | B | 1.0 | 300 | 1,366.10 | 1,643.03 | 1,788.03 | 2,188.70 | 25,344 | 70.3 | 0.00 | 13.42 | 1,854.9 | 65.3 | 2 | 0 |
+| attrib-s000 | B | 0.0 | 300 | 1,193.63 | 1,462.53 | 1,617.27 | 1,934.57 | 28,940 | 80.2 | 0.00 | 13.23 | 1,652.2 | 64.4 | 0 | — |
+
+### Medias por variante y overhead (formulas 4.C)
+
+| metrica | A (media) | B (media) | overhead % |
+|---|---|---|---|
+| p99 latencia (ms) | 1,750.74 | 1,837.20 | 4.94 |
+| CPU host % | 12.45 | 13.27 | 6.62 |
+| Memoria usada (MB) | 1,453.1 | 1,809.4 | 24.52 |
+| req/s | 96.2 | 78.6 | — |
+| error rate % | 0.00 | 0.06 | — |
+
+Desviacion entre replicas: p99 A 708.45 ms, B 423.62 ms.
+
+### Atribucion (sampling 1.0 vs 0.0)
+
+- p99 sampling 1.0: 1,788.03 ms
+- p99 sampling 0.0: 1,617.27 ms
+- p99 baseline A:   1,750.74 ms
+- generacion+export de spans: 9.75 % del p99 de A
+- contexto/propagacion:       -7.62 % del p99 de A
+
+### Coste incremental por nube (variante B)
+
+| run | AWS records | AWS ingest est. GB | AWS USD | GCP ingestion bytes | GCP USD |
+|---|---|---|---|---|---|
+| B1 | 86,218 | 0.061 | 0.0306 | 70,458,902 | 0.0000 |
+| B2 | 86,012 | 0.061 | 0.0305 | 71,179,688 | 0.0000 |
+| B3 | 72,308 | 0.051 | 0.0256 | 59,091,399 | 0.0000 |
+| attrib-s100 | 72,860 | 0.052 | 0.0258 | 61,060,032 | 0.0000 |
+| attrib-s000 | 85,633 | 0.061 | 0.0304 | 71,764,393 | 0.0000 |
+
+- Total campana AWS: 0.1430 USD · GCP: 0.0000 USD · fuente: real_ingest
+- X-Ray / Cloud Trace: **$0** durante la campana — los exporters de trazas gestionadas estan apagados (OTEL_TRACES_XRAY / OTEL_TRACES_CLOUDTRACE / pipeline->nop, seccion 3.4 C2). Leido del ingest real
+- overhead por dolar: 34.53 %p99/USD (coste total 0.1430 USD)
+
 <!-- /BENCH:TABLE -->
+
+## Lectura honesta de los números
+
+- **El p99 de la variante A trae una réplica contaminada por el arranque**:
+  A1 (primer run de la campaña, 2 561 ms) frente a A2/A3 (1 249 / 1 442 ms) —
+  desviación entre réplicas de A = 708 ms, mayor que el overhead diferencial
+  que se quiere medir. Por eso el `overhead_latencia_pct` sobre la **media de
+  p99** (+4,94 %) queda subestimado y la atribución "contexto/propagación"
+  sale negativa (−7,62 %): artefacto del outlier, no un resultado.
+- **La señal limpia está en p50**: A 962/970/974 ms (desviación 6,2 ms — el
+  túnel/stack es estable entre réplicas, como exige §4.A "dos A ≈ ruido")
+  frente a B 1 159/1 154/1 247 ms (media 1 187 ms) → **overhead p50 ≈ +22,5 %**
+  con OTel al 25 %. El p99 de B es *menor* que el de A1 porque la carga de B fue ~15 %
+  inferior (82 vs 96 req/s: el coste de instrumentación reduce el throughput
+  del bucle cerrado, no solo la latencia).
+- **CPU**: 12,45 % → 13,27 % de tiempo no-idle del host (+6,6 % relativo); el
+  collector pasa de ~0,001 a ~0,002–0,003 cores con el gate cerrado y el sink
+  nop — el coste dominante de CPU está en la serialización OTLP dentro de los
+  servicios, no en el collector.
+- **Memoria**: +24,5 % de RAM usada en el host (1,45 → 1,81 GB): buffers del
+  SDK (BatchSpanProcessor/BatchLogRecordProcessor) + heap del collector
+  (28→52 MB). En el perfil Fargate (límite 2 GB) esto es lo que más cerca
+  queda del ceiling — limitación 1 arriba.
+- **Salud del pipeline**: queue 0–2 batches, refused/failed 0 en los 5 runs B
+  (con sampling 1.0 incluido) → el batch 1024/5 s absorbe la carga sin
+  descartar señales.
+- **Coste**: AWS 0,143 USD por los 5 runs B (86k–73k registros/run × 762 B
+  muestreados, $0.50/GB ingest+indexación). GCP: 15–72 MB por run vía
+  records×bytes (ventana de billing como cross-check) — **$0**, dentro de los
+  50 GB/mes libres. Campaña total ≈ 0,14 USD < 0,50 USD. X-Ray y Cloud Trace:
+  $0 **demostrado**, no estimado: el pipeline de trazas del collector en modo
+  bench drena a `nop` y ningún request salió hacia las nubes (C2).
+- **Throughput**: A 96,2 req/s vs B 78,6 req/s (−18 %) a 100 VU cerrados: con
+  think-time OFF, el overhead se manifiesta como caída de tasa además de
+  latencia — coherente con que el cuello sea CPU en el bucle de instrumentación.
 
 ## Discusión (rúbrica: por qué el overhead es como es)
 

@@ -1,0 +1,27 @@
+﻿{
+    "run":  "B1",
+    "start_utc":  "2026-10-13T00:26:47Z",
+    "end_utc":  "2026-10-13T00:32:48Z",
+    "hostname":  "DESKTOP-CPN28LT",
+    "queries":  {
+                    "cpu_nonidle_ratio":  0.13136362136658894,
+                    "collector_cpu_cores":  0.014737462630005475,
+                    "mem_used_bytes":  2010849280,
+                    "mem_limit_bytes":  null,
+                    "collector_heap_bytes":  54443768,
+                    "exporter_queue_size":  0,
+                    "send_failed_spans":  null,
+                    "refused_spans":  0,
+                    "failed_spans":  0,
+                    "accepted_spans":  166246,
+                    "sent_spans":  null,
+                    "accepted_log_records":  87135,
+                    "sent_log_records":  172436,
+                    "accepted_metric_points":  4417,
+                    "sent_metric_points":  4417,
+                    "aws_sent_log_records":  86218,
+                    "gcp_sent_log_records":  86218,
+                    "collector_uptime_s":  426.483903764,
+                    "series_total":  907
+                }
+}

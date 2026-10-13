@@ -1,0 +1,98 @@
+﻿[
+    {
+        "run":  "A1",
+        "variant":  "A",
+        "sampling":  "1.0",
+        "cloud_logs":  false,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T00:14:10Z",
+        "end_utc":  "2026-10-13T00:20:12Z"
+    },
+    {
+        "run":  "B1",
+        "variant":  "B",
+        "sampling":  "0.25",
+        "cloud_logs":  true,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T00:26:47Z",
+        "end_utc":  "2026-10-13T00:32:48Z"
+    },
+    {
+        "run":  "B2",
+        "variant":  "B",
+        "sampling":  "0.25",
+        "cloud_logs":  true,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T00:39:35Z",
+        "end_utc":  "2026-10-13T00:45:37Z"
+    },
+    {
+        "run":  "A2",
+        "variant":  "A",
+        "sampling":  "1.0",
+        "cloud_logs":  false,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T00:52:18Z",
+        "end_utc":  "2026-10-13T00:58:20Z"
+    },
+    {
+        "run":  "A3",
+        "variant":  "A",
+        "sampling":  "1.0",
+        "cloud_logs":  false,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T01:04:52Z",
+        "end_utc":  "2026-10-13T01:10:54Z"
+    },
+    {
+        "run":  "B3",
+        "variant":  "B",
+        "sampling":  "0.25",
+        "cloud_logs":  true,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:62b20f29832f78efb137d91b5ee2ce14124810fb2c18789c6070d7ad08a8baea",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T01:17:29Z",
+        "end_utc":  "2026-10-13T01:23:32Z"
+    },
+    {
+        "run":  "attrib-s100",
+        "variant":  "B",
+        "sampling":  "1.0",
+        "cloud_logs":  true,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:06c7447f69b7a356ee71db9668bed76a79daf39b1df67e2c0aa050e4f668a2c0",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T01:30:23Z",
+        "end_utc":  "2026-10-13T01:36:25Z"
+    },
+    {
+        "run":  "attrib-s000",
+        "variant":  "B",
+        "sampling":  "0.0",
+        "cloud_logs":  true,
+        "steady_seconds":  300,
+        "hostname":  "DESKTOP-CPN28LT",
+        "image_id":  "sha256:06c7447f69b7a356ee71db9668bed76a79daf39b1df67e2c0aa050e4f668a2c0",
+        "k6_exit_code":  0,
+        "start_utc":  "2026-10-13T01:43:13Z",
+        "end_utc":  "2026-10-13T01:49:15Z"
+    }
+]

@@ -401,9 +401,13 @@ def compute_cost(runs: list[RunData]) -> dict:
                 aws_total_usd += row["aws_usd"]
             gcp_window = r.cost.get("gcp_ingestion_bytes_window")
             gcp_est = r.cost.get("gcp_ingest_est_bytes")
-            # Prefer the billing-metric window read; fall back to the
-            # records x sampled-bytes anchor when the metric lags (5-10 min).
-            gcp_bytes = gcp_window if (gcp_window or 0) > 0 else gcp_est
+            # Primary: records x sampled entry size (the exporter counter is
+            # exact per run). The billing-metric window read is kept as a
+            # cross-check when it is larger — its points lag 5-10 min, so a
+            # per-run window query undercounts otherwise.
+            gcp_bytes = gcp_est
+            if (gcp_window or 0) > (gcp_est or 0):
+                gcp_bytes = gcp_window
             if gcp_bytes is not None:
                 gcp_gb = gcp_bytes / 2**30
                 row["gcp_ingestion_bytes"] = gcp_bytes

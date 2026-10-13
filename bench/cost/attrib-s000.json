@@ -1,0 +1,17 @@
+﻿{
+    "run":  "attrib-s000",
+    "window":  {
+                   "end_utc":  "2026-10-13T01:49:15Z",
+                   "start_utc":  "2026-10-13T01:43:13Z"
+               },
+    "aws_stored_bytes_before":  0,
+    "aws_stored_bytes_after":  0,
+    "aws_stored_bytes_delta":  0,
+    "aws_sent_log_records":  85633,
+    "aws_bytes_per_record_sample":  762.472,
+    "aws_ingest_est_bytes":  65292765,
+    "gcp_sent_log_records":  85633,
+    "gcp_bytes_per_record_sample":  838.046,
+    "gcp_ingest_est_bytes":  71764393,
+    "gcp_ingestion_bytes_window":  0
+}

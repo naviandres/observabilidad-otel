@@ -1,0 +1,17 @@
+﻿{
+    "run":  "B2",
+    "window":  {
+                   "end_utc":  "2026-10-13T00:45:37Z",
+                   "start_utc":  "2026-10-13T00:39:35Z"
+               },
+    "aws_stored_bytes_before":  0,
+    "aws_stored_bytes_after":  0,
+    "aws_stored_bytes_delta":  0,
+    "aws_sent_log_records":  86012,
+    "aws_bytes_per_record_sample":  762.368,
+    "aws_ingest_est_bytes":  65572796,
+    "gcp_sent_log_records":  87100,
+    "gcp_bytes_per_record_sample":  817.218,
+    "gcp_ingest_est_bytes":  71179688,
+    "gcp_ingestion_bytes_window":  15228522
+}
