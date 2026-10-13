@@ -1,0 +1,48 @@
+# Benchmark variant overlay (PLAN §4.A) — used with docker-compose.yml and
+# docker-compose.observability.yml (starting only postgres, otel-collector,
+# service-a, service-b and prometheus; jaeger and grafana stay down).
+#
+#   docker compose -f deploy/docker-compose.yml `
+#     -f deploy/docker-compose.observability.yml `
+#     -f deploy/docker-compose.bench.yml `
+#     up -d postgres otel-collector service-a service-b prometheus
+#
+# The orchestrator (scripts/benchmark.ps1) drives the two variants through
+# host env vars, interpolated by Compose at up time:
+#
+#   variant A (baseline)     OTEL_BENCH_ENABLED=false
+#   variant B (instrumented) OTEL_BENCH_ENABLED=true  OTEL_BENCH_SAMPLING=0.25
+#   attribution runs         OTEL_BENCH_SAMPLING=1.0 / 0.0
+#   cloud log ingest gates   OTEL_BENCH_AWS_LOGS_EXPORTER / OTEL_BENCH_GCP_LOGS_EXPORTER
+#                            (exporter names in deploy/collector/otel-collector-bench.yaml)
+#
+# Same images and same digest for A and B: the engine toggle is the only
+# difference (PLAN §4.A "mismo binario, flag on/off").
+services:
+  service-a:
+    environment:
+      OTEL_ENABLED: "${OTEL_BENCH_ENABLED:-true}"
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "${OTEL_BENCH_SAMPLING:-0.25}"
+
+  service-b:
+    environment:
+      OTEL_ENABLED: "${OTEL_BENCH_ENABLED:-true}"
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "${OTEL_BENCH_SAMPLING:-0.25}"
+
+  otel-collector:
+    environment:
+      # AWS credentials for the gated awscloudwatchlogs exporter are passed
+      # through from the orchestrator's process (aws configure
+      # export-credentials) — never stored in a file in this repo.
+      AWS_REGION: "${BENCH_AWS_REGION:-us-east-1}"
+      AWS_ACCESS_KEY_ID: "${BENCH_AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${BENCH_AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${BENCH_AWS_SESSION_TOKEN:-}"
+      GCP_PROJECT_ID: "${BENCH_GCP_PROJECT:-}"
+      OTEL_BENCH_TRACES_EXPORTER: "${OTEL_BENCH_TRACES_EXPORTER:-nop}"
+      OTEL_BENCH_AWS_LOGS_EXPORTER: "${OTEL_BENCH_AWS_LOGS_EXPORTER:-nop/aws}"
+      OTEL_BENCH_GCP_LOGS_EXPORTER: "${OTEL_BENCH_GCP_LOGS_EXPORTER:-nop/gcp}"
+    volumes:
+      - ./collector/otel-collector-bench.yaml:/etc/otel-collector-config.yaml:ro

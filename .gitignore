@@ -28,6 +28,9 @@ dist/
 htmlcov/
 .mypy_cache/
 
+# === Benchmark raw logs (summaries/windows/metrics/cost JSONs are kept) ===
+bench/logs/
+
 # === Terraform ===
 .terraform/
 *.tfplan

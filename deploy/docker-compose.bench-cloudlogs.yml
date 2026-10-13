@@ -1,0 +1,17 @@
+# Extra overlay for the cloud-log-ingest probes only (PLAN §4.B cost column,
+# §3.4 C2: traces are NOT ingested — logs are the dominant paid signal).
+#
+# Requires docker-compose.bench.yml alongside. Mounts the operator's gcloud
+# Application Default Credentials read-only from its real location (outside
+# this repo — BENCH_ADC_FILE must point at it; nothing is copied here) and
+# switches the collector to those creds. The orchestrator additionally sets
+# OTEL_BENCH_AWS_LOGS_EXPORTER / OTEL_BENCH_GCP_LOGS_EXPORTER to the bench
+# exporter names to open the gates.
+#
+#   BENCH_ADC_FILE="$env:APPDATA\gcloud\application_default_credentials.json"
+services:
+  otel-collector:
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /google/adc.json
+    volumes:
+      - ${BENCH_ADC_FILE:?application default credentials file required}:/google/adc.json:ro

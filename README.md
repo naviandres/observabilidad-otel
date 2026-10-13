@@ -100,6 +100,34 @@ es deuda del guardrail de coste del proximo ciclo. Grafana NUNCA consulta CloudW
 (GetMetricData se cobra siempre, R-05): el dashboard de 6 paneles vive en
 Prometheus y el de CloudWatch es el complemento nativo de 3 widgets.
 
+## Benchmark de overhead (Fase 4, PLAN §4)
+
+La campana ABBA corre contra el stack LOCAL (compose) con k6 en Docker y
+Prometheus local como instrumento; jaeger/grafana permanecen apagados. El
+coste por nube se lee del ingest REAL de logs de la variante B (trazas OFF
+por §3.4 C2), sin sesion de computo en ninguna nube.
+
+```powershell
+# campana completa A/B (6 runs x ~7 min) + atribucion (2 runs):
+powershell -File scripts/benchmark.ps1 -Mode full -CloudLogs
+powershell -File scripts/benchmark.ps1 -Mode attrib -CloudLogs
+# smoke corto y probes de ingesta cloud:
+powershell -File scripts/benchmark.ps1 -Mode quick
+powershell -File scripts/benchmark.ps1 -Mode cloudprobe
+# agregacion -> k6/baseline.json, k6/otel.json y tabla de docs/evidence/04-overhead.md:
+python scripts/bench_report.py
+```
+
+- Variante A = `OTEL_ENABLED=false`; B = `true` con
+  `OTEL_TRACES_SAMPLER=parentbased_traceidratio`, arg 0.25 (1.0 / 0.0 para la
+  atribucion) y el pipeline de trazas del collector en sink `nop`
+  (`deploy/collector/otel-collector-bench.yaml`).
+- Artefactos crudos por run en `bench/` (windows.json, k6/, metrics/, cost/);
+  logs en `bench/logs/` (gitignored). El orquestador hace teardown completo al
+  terminar o fallar.
+- Limitaciones declaradas (perfil local vs Fargate/e2-small, k6 compartiendo
+  host, metodologia de coste por ventana): `docs/evidence/04-overhead.md`.
+
 ## Imágenes (tags fijados, sin `:latest`)
 
 | Servicio | Imagen |
@@ -109,6 +137,7 @@ Prometheus y el de CloudWatch es el complemento nativo de 3 widgets.
 | jaeger | `jaegertracing/all-in-one:1.76.0` |
 | prometheus | `prom/prometheus:v2.53.0` |
 | grafana | `grafana/grafana:11.1.0` |
+| k6 (benchmark) | `grafana/k6:2.0.0` |
 
 ## Ejecución sin Docker (desarrollo)
 
