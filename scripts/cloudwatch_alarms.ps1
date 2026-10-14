@@ -7,8 +7,11 @@
     mismo AlarmName. Las alarmas leen UNICAMENTE los contadores EMF que el
     collector publica en el namespace OtelLab (lista blanca de 4 metricas,
     decision de coste PLAN 3.4 C1); no introducen metricas nuevas ni usan
-    GetMetricData (R-05). Sin acciones SNS por ahora: AlarmActions queda
-    vacio y la notificacion es deuda del guardraíl de coste.
+    GetMetricData (R-05). Si se pasa -SnsTopicArn (output `alerts_topic_arn`
+    del IaC, feature #9), se inyecta como AlarmActions en cada alarma; sin el,
+    AlarmActions queda como venga en el JSON (vacio) y la notificacion es
+    responsabilidad de quien invoque el script (p. ej. `make aws-alarms
+    SNS_TOPIC_ARN=<arn>`).
 
     NO re-serializa con ConvertFrom-Json/ConvertTo-Json: en Windows
     PowerShell 5.1 ese round-trip corrompe el JSON (colapsa arrays de un
@@ -29,17 +32,38 @@
 .PARAMETER File
     Ruta del JSON con el array de objetos de parametro para
     aws cloudwatch put-metric-alarm --cli-input-json.
+.PARAMETER SnsTopicArn
+    ARN del topic SNS de alertas (output `alerts_topic_arn` de infra/aws). Si
+    se pasa, se inyecta como AlarmActions en cada alarma, cerrando la deuda del
+    guardrail (el topic lo crea el IaC). Vacio = AlarmActions tal
+    como venga en el JSON (comportamiento previo).
+.PARAMETER DryRun
+    Prepara los JSON de alarma (con AlarmActions si se paso -SnsTopicArn) y los
+    imprime SIN llamar a AWS. Util para verificar el cableado del topic sin
+    sesion de nube.
+.PARAMETER Help
+    Imprime esta ayuda (comment-based help) y termina. Util en CI/verificacion.
 .EXAMPLE
     pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1
     powershell -NoProfile -File scripts/cloudwatch_alarms.ps1
-    make aws-alarms
+    powershell -NoProfile -File scripts/cloudwatch_alarms.ps1 -SnsTopicArn arn:aws:sns:us-east-1:123:otel-lab-alerts
+    powershell -NoProfile -File scripts/cloudwatch_alarms.ps1 -SnsTopicArn arn:aws:sns:us-east-1:123:otel-lab-alerts -DryRun
+    make aws-alarms SNS_TOPIC_ARN=arn:aws:sns:us-east-1:123:otel-lab-alerts
 #>
 [CmdletBinding()]
 param(
     [string]$Region = "us-east-1",
     [string]$Profile = "otel-lab",
-    [string]$File = "dashboards/cloudwatch-alarms.json"
+    [string]$File = "dashboards/cloudwatch-alarms.json",
+    [string]$SnsTopicArn = "",
+    [switch]$DryRun,
+    [switch]$Help
 )
+
+if ($Help) {
+    Get-Help $PSCommandPath -Full | Out-String | Write-Host
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -74,11 +98,14 @@ New-Item -ItemType Directory -Path $tmpDir | Out-Null
 $splitScript = @'
 import json, os, sys
 src, outdir = sys.argv[1], sys.argv[2]
+topic = os.environ.get("OTEL_SNS_TOPIC", "").strip()
 with open(src, encoding="utf-8") as fh:
     alarms = json.load(fh)
 if not isinstance(alarms, list):
     sys.exit("el JSON de alarmas debe ser un array")
 for i, alarm in enumerate(alarms):
+    if topic:
+        alarm["AlarmActions"] = [topic]
     path = os.path.join(outdir, "alarm-%d.json" % i).replace("\\", "/")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(alarm, fh)
@@ -92,11 +119,28 @@ try {
     # UTF8 SIN BOM: Set-Content -Encoding UTF8 de PS 5.1 escribe BOM y python
     # lo rechaza (SyntaxError).
     [System.IO.File]::WriteAllText($splitPy, $splitScript, (New-Object System.Text.UTF8Encoding($false)))
+    # El topic SNS (si se paso) viaja por entorno al splitter python, que
+    # inyecta AlarmActions en cada alarma.
+    $env:OTEL_SNS_TOPIC = $SnsTopicArn
     $splitOut = & $python $splitPy $File $tmpDir
     if ($LASTEXITCODE -ne 0 -or -not $splitOut) {
         Write-Error "fallo al partir el JSON de alarmas con python (exit $LASTEXITCODE)"
     }
     $entries = @($splitOut | ForEach-Object { $n, $p = $_ -split "`t"; [pscustomobject]@{ Name = $n; Path = $p } })
+
+    if ($DryRun) {
+        # Verificacion del cableado SIN AWS: imprime el AlarmActions preparado de
+        # cada alarma (leer el JSON con ConvertFrom-Json es seguro; el bug de
+        # re-serializacion era de ConvertTo-Json).
+        foreach ($entry in $entries) {
+            $obj = Get-Content -LiteralPath $entry.Path -Raw | ConvertFrom-Json
+            $actions = @($obj.AlarmActions)
+            Write-Host "[alarms] (dry-run) $($entry.Name) AlarmActions=[$($actions -join ', ')]"
+        }
+        Write-Host "[alarms] dry-run: $($entries.Count) alarmas preparadas; no se llama a AWS." -ForegroundColor Cyan
+        return
+    }
+
     Write-Host "[alarms] aplicando $($entries.Count) alarmas (idempotente, put-metric-alarm)"
 
     foreach ($entry in $entries) {
@@ -123,7 +167,11 @@ try {
         Write-Host "[alarms] verificada $state"
     }
 
-    Write-Host "[alarms] listo: $($entries.Count) alarmas en $Region (sin acciones SNS, deuda del guardraíl)"
+    if ($SnsTopicArn) {
+        Write-Host "[alarms] listo: $($entries.Count) alarmas en $Region -> AlarmActions=$SnsTopicArn" -ForegroundColor Green
+    } else {
+        Write-Host "[alarms] listo: $($entries.Count) alarmas en $Region (sin AlarmActions; pasa -SnsTopicArn para cablearlas al topic)" -ForegroundColor Yellow
+    }
 } finally {
     Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }
