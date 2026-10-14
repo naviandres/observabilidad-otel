@@ -36,6 +36,11 @@ ECS_SERVICE     ?= otel-lab
 ECS_TASK_FAMILY ?= otel-lab
 TASK_ROLE       ?= otel-lab-task-ecs
 EXEC_ROLE       ?= otel-lab-exec-ecs
+# Topic SNS de alertas: `output alerts_topic_arn` del root infra/aws (feature #9).
+# Al pasarlo, `make aws-alarms` cablea AlarmActions de las alarmas a ese topic.
+# Vacio = las alarmas se crean/actualizan igual pero sin accion SNS. Obtenlo con:
+#   terraform -chdir=infra/aws output -raw alerts_topic_arn
+SNS_TOPIC_ARN   ?=
 # Red minima (subnet publica + IGW, sin NAT): IDs descubiertos por tag, sin state.
 NET_NAME        ?= otel-lab
 VPC_CIDR        ?= 10.20.0.0/16
@@ -45,6 +50,17 @@ SUBNET_CIDR     ?= 10.20.1.0/24
 # Para el flujo cross-cloud (AWS -> GCP) pasarlo al LB de `make gcp-expose`:
 #   make aws-start INVENTORY_URL=http://<LB_IP>:8001
 INVENTORY_URL   ?= http://localhost:8001
+
+# --- Infraestructura AWS como codigo (PLAN §5.A) -----------------------------
+# El root de Terraform vive en infra/aws (state en S3, workspaces lab|bench).
+# `tf-validate-aws` y `tf-plan-aws` replican los pasos del workflow
+# terraform-plan.yml (init -backend=false + fmt + validate + plan + guard_cost):
+# NO tocan el state remoto. El flujo con state real (apply manual, con el
+# bucket ya creado por el bootstrap) es:
+#     terraform -chdir=infra/aws init        # backend S3
+#     terraform -chdir=infra/aws plan -detailed-exitcode   # 0=sin cambios, 2=drift
+TERRAFORM   ?= terraform
+TF_AWS_DIR  ?= infra/aws
 
 # --- Verificacion de correlacion (PLAN 3.A) ---------------------------------
 PYTHON          ?= python3
@@ -61,6 +77,7 @@ AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
 .PHONY: gcp-start gcp-stop gcp-destroy deploy-gcp gcp-expose port-gcp port-jaeger-gcp \
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
         aws-access-grant aws-access-revoke aws-verify aws-dashboard aws-alarms \
+        tf-validate-aws tf-plan-aws cost-guard budget-hours budget-sync \
         validate-collector \
         verify-correlation verify-correlation-gcp verify-correlation-aws \
         verify-correlation-dual
@@ -320,9 +337,47 @@ aws-dashboard:
 # aws-alarms — 2 alarmas de guardraíl desde dashboards/cloudwatch-alarms.json
 # (ratio de error EMF y degradacion de DB como aproximacion disponible de la
 # p99; ver el JSON y docs/evidence/05-dashboards-local.md para las desviaciones).
-# Idempotente via put-metric-alarm. Sin acciones SNS (deuda del guardraíl).
+# Idempotente via put-metric-alarm. AlarmActions -> topic SNS del IaC (#9) si se
+# pasa SNS_TOPIC_ARN (output `alerts_topic_arn`); sin el, la alarma se crea/actualiza
+# igual pero sin accion SNS.
 aws-alarms:
-	pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
+	pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE) -SnsTopicArn "$(SNS_TOPIC_ARN)"
+
+# ===========================================================================
+# Guardarrailes de coste de la pata AWS (PLAN §3.5 / §5.A).
+# ===========================================================================
+
+# tf-validate-aws — init sin backend + fmt -check + validate (lo mismo que
+# ejecuta el workflow terraform-plan.yml en cada PR). No toca el state remoto.
+tf-validate-aws:
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) init -backend=false -input=false
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) fmt -check -recursive
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) validate
+
+# tf-plan-aws — plan del root AWS + gate de lista negra (guard_cost.py). Mismo
+# patron que el workflow: init -backend=false, plan y `terraform show -json`
+# canalizado al guard. `plan -detailed-exitcode` (0 = sin cambios, 2 = drift)
+# esta documentado en infra/README.md para el flujo con state S3 real.
+tf-plan-aws:
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) init -backend=false -input=false
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) plan -input=false -no-color -out=tfplan.bin -var "aws_region=$(AWS_REGION)"
+	$(TERRAFORM) -chdir=$(TF_AWS_DIR) show -json tfplan.bin | $(PYTHON) scripts/guard_cost.py --provider aws
+	@rm -f $(TF_AWS_DIR)/tfplan.bin
+
+# cost-guard — guardarrail EN VIVO: Cost Explorer diario + recursos que facturan
+# ahora mismo (AWS y, si hay gcloud, GCP). Exit 1 si hay fugas.
+cost-guard:
+	pwsh -NoProfile -File scripts/cost_guard.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
+
+# budget-hours — gate de las 150 h de task Fargate del PLAN §3.5: suma la
+# columna `hours` de docs/evidence/instance-hours.csv y FALLA si se supero.
+budget-hours:
+	pwsh -NoProfile -File scripts/instance_hours.ps1 -Mode check
+
+# budget-sync — refresca el CSV desde las tasks del cluster ECS (startedAt/
+# stoppedAt) y despues aplica el mismo gate de horas.
+budget-sync:
+	pwsh -NoProfile -File scripts/instance_hours.ps1 -Mode sync -Cluster $(ECS_CLUSTER) -Region $(AWS_REGION) -Profile $(AWS_PROFILE)
 
 # validate-collector — PLAN §2.C: el binario ADOT (v0.46.0) NO tiene subcomando
 # `validate`; se valida por ARRANQUE limpio ("Everything is ready" == exit 0).

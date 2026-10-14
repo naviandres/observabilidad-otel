@@ -17,8 +17,10 @@ Providers:
               de interfaz, EIP, EKS, RDS, WAF, Secrets Manager, CloudFront,
               API Gateway, Kinesis, Firehose, ElastiCache, Aurora, MSK,
               DataSync, App Runner, Lightsail, Cloud9, Redshift, SageMaker,
-              Bedrock, OpenSearch). Stub: mismo contrato; el root AWS aun no
-              produce planes que lo ejerciten.
+              Bedrock, OpenSearch) mas dos guardarrailes condicionales de
+              §3.5: `aws_ecs_service` con desired_count > 1 y
+              `aws_cloudwatch_log_group` sin retencion de 3 dias. Lo invoca
+              `make cost-guard` y el workflow `terraform-plan.yml`.
 
 Disenado para CI y pre-commit: sin dependencias externas (solo stdlib).
 """
@@ -85,6 +87,16 @@ AWS_FORBIDDEN_TYPES: dict[str, str] = {
     "metric alarms de pago por separado",
 }
 
+# AWS: el service ECS corre un unico par (1 task Fargate = 1 vCPU + 2 GB).
+# Mas de una task multiplica el coste por hora (§3.5).
+ECS_SERVICE_TYPE = "aws_ecs_service"
+MAX_ECS_DESIRED_COUNT = 1
+
+# AWS: los log groups del lab deben retener 3 dias; 0 (nunca expira) o mas de 3
+# dias hacen crecer la factura de CloudWatch Logs (§3.5 higiene de datos).
+LOG_GROUP_TYPE = "aws_cloudwatch_log_group"
+LOG_RETENTION_DAYS = 3
+
 
 # ---------------------------------------------------------------------------
 # Walk del plan JSON
@@ -141,6 +153,29 @@ def _collect(plan: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ecs_service_oversized(values: dict[str, Any]) -> bool:
+    """Service ECS con mas de MAX_ECS_DESIRED_COUNT tasks Fargate."""
+    n = _int_or_none(values.get("desired_count"))
+    return n is not None and n > MAX_ECS_DESIRED_COUNT
+
+
+def _log_group_retention_bad(values: dict[str, Any]) -> bool:
+    """Log group sin expiracion (0) o con mas dias de los permitidos.
+
+    Ausente/desconocido se considera benigno: el plan puede no resolver el
+    valor y no queremos fallar el gate por un atributo unknown.
+    """
+    n = _int_or_none(values.get("retention_in_days"))
+    return n == 0 or (n is not None and n > LOG_RETENTION_DAYS)
 
 
 def _min_instances_gt_zero(values: dict[str, Any]) -> bool:
@@ -211,7 +246,19 @@ def check_plan(plan: dict[str, Any], provider: str) -> list[str]:
             violations.append(f"{addr}: {rtype} — {reason}")
             continue
 
-        if provider != "google":
+        if provider == "aws":
+            if rtype == ECS_SERVICE_TYPE and _ecs_service_oversized(values):
+                violations.append(
+                    f"{addr}: {rtype} con desired_count="
+                    f"{values.get('desired_count')} — el lab corre 1 task Fargate "
+                    "(mas tasks multiplican el coste, §3.5)"
+                )
+            if rtype == LOG_GROUP_TYPE and _log_group_retention_bad(values):
+                violations.append(
+                    f"{addr}: {rtype} con retention_in_days="
+                    f"{values.get('retention_in_days')} — debe retener "
+                    f"{LOG_RETENTION_DAYS} dias (§3.5 higiene de datos)"
+                )
             continue
 
         if rtype == GKE_CLUSTER_TYPE and _cluster_autopilot(values):
