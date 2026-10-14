@@ -1,0 +1,85 @@
+# CI: terraform plan de la pata AWS + gate de coste (PLAN §5.A: `terraform plan`
+# en cada PR + guard_cost.py; el APPLY solo ocurre a mano desde main — NUNCA
+# aqui). Espejo de terraform-plan-gcp.yml.
+#
+# init con -backend=false: el state vive en S3 y en los PRs no se toca (un plan
+# de PR es una revision de diff, no una lectura de estado real). Si el repo
+# define los secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (usuario
+# otel-lab-deploy, nunca root), el plan resuelve las data sources; sin ellos el
+# job falla con instruccion clara. El gate `guard_cost.py --provider aws` corre
+# SIEMPRE y corta el PR si aparece un recurso de la lista negra (§3.2).
+
+name: terraform-plan-aws
+
+on:
+  pull_request:
+    paths:
+      - "infra/aws/**"
+      - ".github/workflows/terraform-plan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tf-plan-aws-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      TF_VAR_aws_region: us-east-1
+      AWS_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: credenciales AWS desde secrets
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::error::Faltan los secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY \
+            (usuario otel-lab-deploy). Ver infra/README.md."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: terraform init (sin backend)
+        working-directory: infra/aws
+        run: terraform init -backend=false -input=false
+
+      - name: terraform fmt -check
+        working-directory: infra/aws
+        run: terraform fmt -check -recursive
+
+      - name: terraform validate
+        working-directory: infra/aws
+        run: terraform validate
+
+      - name: terraform workspace (lab)
+        working-directory: infra/aws
+        # El plan del CI debe ser el del workspace `lab` (local.is_lab=true:
+        # budget/anomaly entran). `select` falla si no existe -> `new`; con
+        # -backend=false el workspace es solo local al runner.
+        run: terraform workspace select lab || terraform workspace new lab
+
+      - name: terraform plan (workspace lab, service en reposo)
+        working-directory: infra/aws
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: guard_cost (lista negra PLAN §3.2)
+        working-directory: infra/aws
+        run: terraform show -json tfplan.bin | python3 ../../scripts/guard_cost.py --provider aws
+
+      - name: subir JSON del plan como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-aws-json
+          path: infra/aws/tfplan.bin
+          if-no-files-found: ignore
