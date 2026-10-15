@@ -100,8 +100,10 @@ curl.exe -s http://localhost:8889/metrics | Select-String http_server
 docker compose logs service-a | Select-String trace_id
 
 # 4) correlacion cross-signal (aserciones A1-A2; el resto se SKIP por no ir
-#    activas las banderas de nube — no rompen el target)
-make verify-correlation
+#    activas las banderas de nube — no rompen el target). El default del
+#    Makefile (8080) es el port-forward de GKE; en compose service-a escucha
+#    en 8000:
+make verify-correlation VERIFY_ENDPOINT=http://localhost:8000
 
 # 5) UIs: Jaeger http://localhost:16686 · Prometheus http://localhost:9090
 #          Grafana http://localhost:3000 (admin/admin)
