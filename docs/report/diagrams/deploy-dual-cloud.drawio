@@ -1,0 +1,168 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="2704VgUlj9YrpA2Qfqit" name="Página-1">
+    <mxGraphModel dx="2009" dy="1066" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="t1" parent="1" style="text;html=1;fontSize=16;fontStyle=1;align=left;" value="Despliegue dual-cloud — OpenTelemetry (AWS + GCP)" vertex="1">
+          <mxGeometry height="30" width="700" x="40" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="dual" parent="1" style="swimlane;startSize=28;fillColor=#F5F5F5;strokeColor=#666666;html=1;rounded=1;" value="MODO DUAL (A13) — el trace_id cruza la frontera de nubes" vertex="1">
+          <mxGeometry height="170" width="1000" x="40" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="d1" parent="dual" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#ED7100;" value="service-a&lt;br&gt;(ECS Fargate, AWS)" vertex="1">
+          <mxGeometry height="70" width="170" x="40" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" parent="dual" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" value="LB regional (GCP)" vertex="1">
+          <mxGeometry height="70" width="160" x="441" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" parent="dual" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="service-b&lt;br&gt;(GKE Standard, GCP)" vertex="1">
+          <mxGeometry height="70" width="170" x="666" y="70" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" parent="dual" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#DAE8FC;strokeColor=#6C8EBF;" value="postgres (GKE)" vertex="1">
+          <mxGeometry height="80" width="90" x="900" y="65" as="geometry" />
+        </mxCell>
+        <mxCell id="de1" edge="1" parent="dual" source="d1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#B85400;strokeWidth=2;" target="d2" value="HTTP /inventory/reserve&lt;br&gt;INVENTORY_URL + traceparent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="de2" edge="1" parent="dual" source="d2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="d3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="de3" edge="1" parent="dual" source="d3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="d4" value="SQL">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="aws" parent="1" style="swimlane;startSize=28;fillColor=#FFF3E8;strokeColor=#ED7100;html=1;rounded=1;" value="MODO AWS (mono) — una task Fargate awsvpc (mismo namespace de red)" vertex="1">
+          <mxGeometry height="340" width="620" x="40" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" parent="aws" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#ED7100;" value="service-a :8000" vertex="1">
+          <mxGeometry height="60" width="160" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" parent="aws" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#ED7100;" value="service-b :8001" vertex="1">
+          <mxGeometry height="60" width="160" x="230" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" parent="aws" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#FFE6CC;strokeColor=#ED7100;" value="postgres :5432&lt;br&gt;(localhost)" vertex="1">
+          <mxGeometry height="70" width="120" x="440" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" parent="aws" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;" value="Collector ADOT v0.46.0&lt;br&gt;awsxray · awsemf · awscloudwatchlogs&lt;br&gt;prometheus :8889 (scrape local)" vertex="1">
+          <mxGeometry height="90" width="370" x="20" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" parent="aws" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#ED7100;" value="sidecar&lt;br&gt;cloudwatch-agent&lt;br&gt;métricas ECS" vertex="1">
+          <mxGeometry height="90" width="120" x="443" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="ae1" edge="1" parent="aws" source="a1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="a2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ae2" edge="1" parent="aws" source="a2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="a3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CBAD;strokeColor=#C925D1;" value="X-Ray" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="460" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CBAD;strokeColor=#E7157B;" value="CloudWatch EMF" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="331" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CBAD;strokeColor=#E7157B;" value="CloudWatch Logs" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="398" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CBAD;strokeColor=#E7157B;" value="CloudWatch (métricas ECS)" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="523" as="geometry" />
+        </mxCell>
+        <mxCell id="be1" edge="1" parent="1" source="a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;" target="b1" value="awsxray">
+          <mxGeometry relative="1" x="0.6444" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="681.33" y="485" />
+              <mxPoint x="681.33" y="485" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="be2" edge="1" parent="1" source="a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;" target="b2" value="awsemf">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="245" y="390.5" />
+              <mxPoint x="708.83" y="390.5" />
+              <mxPoint x="708.83" y="359.67" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="be3" edge="1" parent="1" source="a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;" target="b3" value="awscloudwatchlogs">
+          <mxGeometry relative="1" x="0.6899" y="7" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="595" y="485" />
+              <mxPoint x="595" y="455" />
+              <mxPoint x="715.5" y="455" />
+              <mxPoint x="715.5" y="420.5" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="be4" edge="1" parent="1" source="a5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#ED7100;dashed=1;" target="b4" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="628.83" y="543" />
+              <mxPoint x="628.83" y="543" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="gcp" parent="1" style="swimlane;startSize=28;fillColor=#E8F0FE;strokeColor=#4285F4;html=1;rounded=1;" value="MODO GCP (mono) — namespace otel-lab (Helm)" vertex="1">
+          <mxGeometry height="340" width="620" x="40" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="g1" parent="gcp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="service-a" vertex="1">
+          <mxGeometry height="60" width="160" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="g2" parent="gcp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="service-b :8001" vertex="1">
+          <mxGeometry height="60" width="160" x="230" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="g3" parent="gcp" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#DAE8FC;strokeColor=#6C8EBF;" value="postgres :5432&lt;br&gt;(ClusterIP)" vertex="1">
+          <mxGeometry height="70" width="120" x="440" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="g4" parent="gcp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;" value="Collector contrib 0.162.0&lt;br&gt;googlecloud · googlemanagedprometheus&lt;br&gt;prometheus exporter :8889" vertex="1">
+          <mxGeometry height="90" width="370" x="20" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="g5" parent="gcp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;" value="Jaeger UI&lt;br&gt;(pod en-cluster)" vertex="1">
+          <mxGeometry height="90" width="120" x="481" y="241" as="geometry" />
+        </mxCell>
+        <mxCell id="ge1" edge="1" parent="gcp" source="g1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="g2" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ge2" edge="1" parent="gcp" source="g2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;" target="g3" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ge3" edge="1" parent="gcp" source="g4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D6B656;" target="g5" value="otlphttp (fan-out)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="Cloud Trace" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="708" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="Cloud Logging&lt;br&gt;(fluent-bit/GKE)" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="775" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#4285F4;" value="Cloud Monitoring" vertex="1">
+          <mxGeometry height="50" width="160" x="760" y="840" as="geometry" />
+        </mxCell>
+        <mxCell id="ce1" edge="1" parent="1" source="g4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;" target="c1" value="googlecloud">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="641.33" y="865" />
+              <mxPoint x="641.33" y="733" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ce2" edge="1" parent="1" source="g4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;dashed=1;" target="c2" value="logs">
+          <mxGeometry relative="1" x="0.5208" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="688.83" y="865" />
+              <mxPoint x="688.83" y="795.5" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ce3" edge="1" parent="1" source="g4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#9673A6;" target="c3" value="googlemanagedprometheus">
+          <mxGeometry relative="1" x="0.5905" y="-9" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -28,7 +28,6 @@ DOCS = ROOT / "docs"
 ADR_DIR = DOCS / "adr"
 IMG_DIR = DOCS / "evidence" / "img"
 REPORT_PDF = DOCS / "report" / "report.pdf"
-REPORT_MD = DOCS / "report" / "report.md"
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 
@@ -103,19 +102,14 @@ def test_report_pdf_exists_and_at_least_five_pages() -> None:
     assert n >= 5, f"report.pdf has only {n} pages"
 
 
-def test_report_markdown_is_the_source_and_covers_both_clouds() -> None:
-    assert REPORT_MD.is_file(), "markdown source for the PDF must be versioned"
-    text = _read(REPORT_MD)
+def test_report_pdf_covers_both_clouds() -> None:
+    """The PDF is the deliverable (human-edited artifact since 2026-10-15;
+    the markdown source is no longer versioned)."""
+    from pypdf import PdfReader
+
+    text = "\n".join((page.extract_text() or "") for page in PdfReader(str(REPORT_PDF)).pages)
     for token in ("X-Ray", "CloudWatch", "Cloud Trace", "Cloud Monitoring", "Fargate", "GKE"):
-        assert token in text, f"report source does not mention {token}"
-
-
-def test_report_headings_have_no_manual_numbers() -> None:
-    """The generator (--number-sections) is the canonical numbering; manual
-    numbers in the source produced doubled titles like '4. 4. Configuración'."""
-    for line in _read(REPORT_MD).splitlines():
-        if line.startswith("#"):
-            assert not re.match(r"^#{1,4} \d", line), f"manually numbered heading: {line}"
+        assert token in text, f"report PDF does not mention {token}"
 
 
 def test_report_pdf_has_no_doubled_heading_numbers() -> None:
@@ -143,7 +137,9 @@ def test_report_pdf_tables_have_no_overlapping_cells() -> None:
 
 
 def test_report_declares_overhead_and_limitations() -> None:
-    text = _read(REPORT_MD)
+    from pypdf import PdfReader
+
+    text = "\n".join((page.extract_text() or "") for page in PdfReader(str(REPORT_PDF)).pages)
     assert "4,94" in text, "headline overhead figure missing"
     assert "outlier" in text.lower(), "declared outlier missing"
     assert "Limitaciones" in text or "límites" in text.lower(), "limitations section missing"
@@ -182,16 +178,9 @@ def test_plan_workflows_still_never_apply() -> None:
         assert "apply" not in run_lines.lower(), f"{name} must never apply"
 
 
-def test_makefile_report_target_pinned_and_reproducible() -> None:
-    assert re.search(r"^report:", MAKEFILE, flags=re.MULTILINE)
-    assert "pandoc/latex:" in MAKEFILE
-    assert "pandoc/latex:latest" not in MAKEFILE
-    assert "docs/report/report.md" in MAKEFILE and "docs/report/report.pdf" in MAKEFILE
-
-
 def test_every_makefile_target_is_documented_in_contributing() -> None:
     targets = set(re.findall(r"^([a-z][a-z0-9-]*):\s*$", MAKEFILE, flags=re.MULTILINE))
-    assert "report" in targets
+    assert "deploy-gcp" in targets
     doc = _read(ROOT / "CONTRIBUTING.md")
     undocumented = {t for t in targets if f"`{t}`" not in doc}
     assert not undocumented, f"targets missing from CONTRIBUTING table: {undocumented}"
@@ -290,7 +279,7 @@ def test_contributing_documents_the_jargon_gate() -> None:
 def test_new_docs_contain_no_secrets() -> None:
     """No AWS access-key ids, no PEM blocks, no literal passwords in the
     documentation set written for this deliverable."""
-    targets = [ROOT / "ARCHITECTURE.md", ROOT / "CONTRIBUTING.md", ROOT / "COST.md", REPORT_MD]
+    targets = [ROOT / "ARCHITECTURE.md", ROOT / "CONTRIBUTING.md", ROOT / "COST.md"]
     targets += list(ADR_DIR.glob("*.md"))
     targets += list(IMG_DIR.glob("*.svg"))
     patterns = [rb"AKIA[0-9A-Z]{16}", rb"BEGIN (RSA|EC|OPENSSH) PRIVATE KEY", rb"aws_secret_access_key\s*=\s*\S"]
@@ -298,6 +287,77 @@ def test_new_docs_contain_no_secrets() -> None:
         data = f.read_bytes()
         for pat in patterns:
             assert not re.search(pat, data), f"secret-like match ({pat}) in {f}"
+
+
+# ---------------------------------------------------------------------------
+# Deployment diagram — maintained draw.io source + SVG export
+# ---------------------------------------------------------------------------
+
+DIAGRAMS = DOCS / "report" / "diagrams"
+DIAGRAM_DRAWIO = DIAGRAMS / "deploy-dual-cloud.drawio"
+DIAGRAM_SVG = DIAGRAMS / "deploy-dual-cloud.svg"
+
+
+def test_deploy_diagram_drawio_is_wellformed_mxgraphmodel() -> None:
+    import xml.etree.ElementTree as ET
+
+    assert DIAGRAM_DRAWIO.is_file(), "draw.io source for the deployment diagram missing"
+    top = ET.parse(DIAGRAM_DRAWIO).getroot()
+    model = top
+    if top.tag == "mxfile":  # canonical draw.io save format
+        import base64
+        import urllib.parse
+        import zlib
+
+        diagram = top.find("diagram")
+        assert diagram is not None, "mxfile without diagram payload"
+        model = diagram.find("mxGraphModel")
+        if model is None:  # compressed save format: base64 raw-deflate + urlencode
+            payload = urllib.parse.unquote(
+                zlib.decompress(base64.b64decode(diagram.text), -15).decode("utf-8")
+            )
+            model = ET.fromstring(payload)
+    assert model.tag == "mxGraphModel", f"unexpected root {model.tag!r} after unwrapping"
+    graph_root = model.find("root")
+    assert graph_root is not None, "mxGraphModel without <root>"
+    cells = list(graph_root.iter("mxCell"))
+    ids = [c.get("id") for c in cells]
+    assert len(ids) == len(set(ids)), "duplicate mxCell ids"
+    idset = set(ids)
+    for c in cells:
+        if c.get("edge") == "1":
+            assert c.get("source") in idset and c.get("target") in idset, (
+                f"edge {c.get('id')} references a missing endpoint"
+            )
+            assert c.find("mxGeometry") is not None, f"edge {c.get('id')} without mxGeometry"
+        if c.get("vertex") == "1":
+            assert c.find("mxGeometry") is not None, f"vertex {c.get('id')} without mxGeometry"
+
+
+def test_deploy_diagram_svg_is_wellformed_and_standalone() -> None:
+    import xml.etree.ElementTree as ET
+
+    assert DIAGRAM_SVG.is_file(), "SVG export of the deployment diagram missing"
+    text = _read(DIAGRAM_SVG)
+    svg = ET.fromstring(text)
+    assert svg.tag.endswith("svg")
+    assert svg.get("viewBox"), "SVG must declare a viewBox to render standalone"
+    for h in re.findall(r'(?:xlink:)?href="([^"]*)"', text):
+        assert h.startswith("data:") or h.startswith("#"), f"non-embedded asset reference: {h[:80]}"
+
+
+def test_diagram_referenced_from_architecture_and_present() -> None:
+    assert DIAGRAM_DRAWIO.is_file() and DIAGRAM_SVG.is_file(), "diagram source/export missing"
+    arch = _read(ROOT / "ARCHITECTURE.md")
+    assert "deploy-dual-cloud.drawio" in arch, "ARCHITECTURE.md must name the draw.io source"
+    assert "deploy-dual-cloud.svg" in arch, "ARCHITECTURE.md must name the SVG export"
+
+
+def test_contributing_documents_the_drawio_to_svg_flow() -> None:
+    doc = _read(ROOT / "CONTRIBUTING.md")
+    assert ".drawio" in doc, "draw.io source of truth must be documented"
+    assert "SVG" in doc and "draw.io" in doc, "regeneration flow must be documented"
+    assert "docs/report/diagrams/" in doc, "diagram location must be documented"
 
 
 if __name__ == "__main__":

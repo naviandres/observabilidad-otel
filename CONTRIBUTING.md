@@ -46,7 +46,7 @@ quotidiano ocurre aquí: los modos nube (README, modos 2-4) son para evidencia.
 | aws CLI | 2.32.31 (+ session-manager-plugin 1.2.835.0) | `docs/evidence/00-aws-baseline.md` |
 | gcloud SDK | 580.0.0 | `docs/evidence/00-free-tier-baseline-gcp.md` |
 | helm / kubectl | los del contexto del cluster GKE | `make deploy-gcp` / `port-gcp` |
-| pandoc (reporte) | imagen `pandoc/latex` (tag fijado en el Makefile) | target `report` |
+| draw.io (diagramas) | app.diagrams.net o desktop (el `.drawio` es XML mxfile editable) | `docs/report/diagrams/` |
 | PowerShell | 7 (`pwsh`) para `scripts/*.ps1` | targets del Makefile |
 
 k6 **no** se instala en el host: corre como imagen dentro de
@@ -63,7 +63,6 @@ k6 **no** se instala en el host: corre como imagen dentro de
 | `verify-correlation-gcp` | idem + banderas Cloud Trace/Logging/Monitoring (requiere ADC y port-forward) |
 | `verify-correlation-aws` | idem + X-Ray/CloudWatch (boto3, perfil `otel-lab`; A8 exige `PROM_URL` app-level) |
 | `verify-correlation-dual` | ambas banderas: evalúa la aserción cruzada A13 (mismo `trace_id` en las dos nubes) |
-| `report` | regenera `docs/report/report.pdf` desde `docs/report/report.md` con pandoc/latex en Docker (ver §6) |
 
 ### AWS — ECS Fargate
 
@@ -146,8 +145,7 @@ git grep -nE 'feature #|feat/[0-9]+|#[0-9]+|harness|sub-tarea|leader spec|pata|p
 Excepciones admitidas: `#[0-9]+` dentro de fragmentos de URL legítimos y el
 vocabulario propio del dominio (p. ej. "aserción A8", "decisión C2"); los
 artefactos binarios (p. ej. `docs/report/report.pdf`) quedan fuera del gate por
-su contenido de texto — el gate se aplica a los fuentes legibles (el texto del
-PDF se comprueba sobre `report.md`, su fuente única).
+su contenido de texto — el gate se aplica a los fuentes legibles.
 
 ## 7. Commits y ramas
 
@@ -171,31 +169,33 @@ PDF se comprueba sobre `report.md`, su fuente única).
 5. Sin secretos: `git grep -nE 'AKIA[0-9A-Z]{16}|password.*=.*[^< ]' ` y
    revisión de `.env` (nunca se commitea; solo `.env.example`).
 6. Si tocaste la narrativa de diseño: ADR nuevo o enlazado.
-7. Si tocaste `docs/report/report.md`: regenera el PDF (§9) y commitea ambos.
+7. Si tocaste los diagramas: regenera el `.svg` desde el `.drawio` (§9.1) y
+   commitea fuente y export juntos; el PDF es artefacto de edición humana (§9).
 
-## 9. Regenerar el reporte PDF
+## 9. El reporte PDF
 
-La fuente única es `docs/report/report.md`; el PDF es un artefacto:
+El entregable `docs/report/report.pdf` es un artefacto de edición humana: se
+produce desde un documento de trabajo (p. ej. Word) que embebe las figuras de
+`docs/evidence/img/` y `docs/report/diagrams/`. La cadena automática
+md→pdf con pandoc se retiró el 2026-10-15 (la fuente markdown ya no se
+versiona). Reglas que siguen vigentes sobre el PDF (comprobadas por
+`tests/test_repo_quality.py`):
 
-```bash
-make report    # docker run pandoc/latex (tag fijado) -> docs/report/report.pdf
-```
+- **Numeración:** sin titulos duplicados tipo "4. 4. Título" (extraer texto
+  con pypdf y buscar el patron).
+- **Tablas:** sin celdas solapadas — tokens pegados tipo
+  `fig-...CloudWatch` no deben aparecer en el texto extraido.
+- **Extensión:** >= 5 paginas. Verifica con
+  `python -c "from pypdf import PdfReader; print(len(PdfReader('docs/report/report.pdf').pages))"`.
+- **Figuras:** los ficheros marcados `PLACEHOLDER-HUMAN-REQUIRED` en
+  `docs/evidence/img/` esperan capturas reales del operador (tabla en
+  `docs/evidence/img/README.md`).
 
-Cadena canónica y sus dos reglas anti-defecto (validación humana 2026-10-15):
+### 9.1 Diagramas mantenidos (fuente draw.io)
 
-- **Numeración:** la pone el generador (`--number-sections`); los headings del
-  .md van SIN números manuales (si no, salen duplicados tipo "4. 4. Título").
-  Los apéndices usan `{.unnumbered}`.
-- **Tablas densas:** los anchos relativos de columna se fijan en el .md con el
-  número de guiones de la fila separadora (`|----|--------|`), y
-  `docs/report/pdf-preamble.tex` (vía `--include-in-header`) aplica
-  `\small\raggedright` + `\emergencystretch` dentro de tablas. Tokens largos
-  (`a/b/c`) se escriben separados con espacios o se parten, si no desbordan la
-  celda. Verificación: compilar y exigir 0 `Overfull \hbox` en el log de
-  XeLaTeX.
-
-Requisitos: Docker en marcha y la imagen del tag fijado (se descarga sola).
-Las figuras referenciadas viven en `docs/evidence/img/`; los ficheros marcados
-`PLACEHOLDER-HUMAN-REQUIRED` esperan capturas reales del operador (ver la
-tabla en `docs/evidence/img/README.md`). Verifica el conteo de páginas tras
-regenerar (p. ej. `python -c "from pypdf import PdfReader; print(len(PdfReader('docs/report/report.pdf').pages))"`).
+La fuente de verdad de los diagramas técnicos es el `.drawio` en
+`docs/report/diagrams/` (XML mxfile editable del editor draw.io). El `.svg`
+hermano es un artefacto derivado: para regenerarlo, abre el `.drawio` en
+draw.io (app.diagrams.net o desktop) y exporta **SVG**. Tras tocar cualquiera
+de los dos, sustituye el `.svg` en el documento de trabajo que produce el
+PDF (§9) y commitea fuente y export juntos.

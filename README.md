@@ -602,7 +602,7 @@ es el pool del pagador. El teardown obligatorio aplica igualmente.
 | [COST.md](COST.md) | modelo de coste dual-cloud, listas blanca/negra, guardarraíles, procedimiento de apagado |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | toolchain fijado, referencia del Makefile (tabla target→qué hace), estilo de docs, gate anti-jerga, regeneración del PDF |
 | [docs/adr/](docs/adr) | registro de decisiones (10 ADRs: cómputo por nube, acceso, collector dual, exemplars, coste, benchmark, dashboards) |
-| [docs/report/report.pdf](docs/report/report.pdf) | reporte técnico (fuente markdown versionada junto a él; regenerar con `make report`) |
+| [docs/report/report.pdf](docs/report/report.pdf) | reporte técnico (artefacto de edición humana; figuras en `docs/evidence/img/` y diagramas en `docs/report/diagrams/`) |
 | [docs/aws-ecs.md](docs/aws-ecs.md) | despliegue AWS/ECS Fargate en detalle: task def, contratos verificados, acceso, ADR de exemplars (A8) |
 | [docs/evidence/](docs/evidence) | evidencia en vivo por fase: línea base de coste (00), WI binding (01), sesiones de despliegue (02), correlación (03), overhead (04), dashboards (05) |
 | [docs/evidence/img/](docs/evidence/img) | figuras del reporte — **placeholders** con título/caption a la espera de las capturas humanas (tabla de qué aportar) |

@@ -43,6 +43,12 @@ Trace (GCP) simultáneamente.
                                              └─ prometheus exporter :8889
 ```
 
+> Fuente editable del diagrama de despliegue (backends por nube, sidecar, LB
+> regional y el salto cross-cloud A13):
+> [`docs/report/diagrams/deploy-dual-cloud.drawio`](docs/report/diagrams/deploy-dual-cloud.drawio)
+> — su export SVG [`deploy-dual-cloud.svg`](docs/report/diagrams/deploy-dual-cloud.svg)
+> es la Figura D1 del reporte.
+
 - **Un solo código, tres modos** (README: modos 1-4): el binario de aplicación
   no cambia entre local, AWS y GCP; solo el YAML del collector, las variables
   de entorno y el cómputo. Esto hace honesto el A/B del benchmark

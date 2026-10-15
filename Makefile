@@ -78,7 +78,7 @@ AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
         aws-access-grant aws-access-revoke aws-verify aws-dashboard aws-alarms \
         tf-validate-aws tf-plan-aws cost-guard budget-hours budget-sync \
-        validate-collector report \
+        validate-collector \
         verify-correlation verify-correlation-gcp verify-correlation-aws \
         verify-correlation-dual
 
@@ -408,24 +408,6 @@ validate-collector:
 	  otel/opentelemetry-collector-contrib:0.162.0 \
 	  validate --config=/cfg/otel-collector-local.yaml
 
-# report — regenera docs/report/report.pdf desde la fuente markdown
-# (docs/report/report.md) con pandoc + XeLaTeX dentro de la imagen fijada
-# `pandoc/latex:3.6.3` (tag exacto, nunca :latest). Ruta canónica única:
-# NUNCA se edita el PDF a mano; se edita el .md y se vuelve a correr:
-#   make report
-# pdf-preamble.tex fija el render de tablas densas (tokens largos sin
-# espacios: raggedright + \small + emergencystretch) y la numeración de
-# títulos es la del generador (--number-sections; el .md NO lleva números).
-# Requisitos: Docker en marcha (la imagen se descarga sola al primer uso).
-# El PDF es un artefacto derivado: se commitea junto con su fuente.
-report:
-	docker run --rm -v "$$(pwd):/work" -w /work pandoc/latex:3.6.3 \
-	  docs/report/report.md -o docs/report/report.pdf \
-	  --pdf-engine=xelatex --toc --number-sections \
-	  --include-in-header=docs/report/pdf-preamble.tex \
-	  -V fontsize=11pt -V geometry:margin=2.2cm -V colorlinks=true \
-	  -V linkcolor=BlueViolet -V urlcolor=NavyBlue
-	@echo ">> docs/report/report.pdf regenerado desde docs/report/report.md"
 
 # ===========================================================================
 # Verificacion de correlacion (PLAN 3.A). El framework decide su salida:
