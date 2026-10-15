@@ -1,15 +1,15 @@
 # docs/evidence/img — figuras del reporte y README
 
-**Estado: PLACEHOLDERS.** Este proyecto no captura pantallas de forma
-automática. Cada `.svg` aquí es un **fichero reservado** con título, caption e
-instrucciones; el humano debe aportar la captura real sustituyéndolo por un
-`.png` **con el mismo nombre base** (así los enlaces del reporte/README no
-cambian y solo hay que pasar `![](...)` de la ruta svg a la png cuando exista).
+**Estado: TOMADAS (2026-10-15).** Las 14 figuras son capturas reales del
+operador en `.png`. Los antiguos placeholders `.svg` se borraron tras la
+sustitución (cada PNG conserva el nombre base reservado, así que los enlaces
+del reporte/README no cambiaron). La columna "Cómo capturarla" queda como
+receta de re-captura para futuras sesiones.
 
 Requisito del plan: 12 capturas como mínimo (6+ por nube). Las figuras L1-L2
 cubren el modo local; A1-A6 el lado AWS; G1-G6 el lado GCP.
 
-| # | Fichero (reservado) | Contenido esperado | Cómo capturarla (resumen) | Coste de la sesión |
+| # | Fichero (png) | Contenido esperado | Cómo capturarla (resumen) | Coste de la sesión |
 |---|---|---|---|---|
 | L1 | `fig-l1-jaeger-local-waterfall` | Waterfall Jaeger local: a→b→DB, spans de negocio + SQL | `docker compose up` + `POST /orders` + localhost:16686 | $0 |
 | L2 | `fig-l2-grafana-slo-6-paneles` | Grafana `otel-lab-slo` con los 6 paneles y una ráfaga de 5xx visible | stack observability + 15 POST + matar service-b 3 s + localhost:3000 | $0 |

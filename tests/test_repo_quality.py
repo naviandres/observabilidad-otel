@@ -191,15 +191,18 @@ def test_every_makefile_target_is_documented_in_contributing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_placeholder_figures_reserved_with_marker() -> None:
-    svgs = sorted(IMG_DIR.glob("*.svg"))
-    assert len(svgs) >= 5, f"only {len(svgs)} placeholder figures"
-    for p in svgs:
-        assert "PLACEHOLDER-HUMAN-REQUIRED" in _read(p), f"{p.name} lacks the marker"
+def test_figures_are_real_captures() -> None:
+    """Placeholders were replaced by real operator captures on 2026-10-15:
+    every figure exists as PNG and no PLACEHOLDER svg survives in the dir."""
+    pngs = sorted(IMG_DIR.glob("fig-*.png"))
+    assert len(pngs) >= 14, f"only {len(pngs)} real figures"
+    assert not list(IMG_DIR.glob("fig-*.svg")), "placeholder svgs must be gone"
+    for p in pngs:
+        assert p.stat().st_size > 10_000, f"{p.name} suspiciously small for a capture"
 
 
-def test_placeholder_coverage_both_clouds_and_local() -> None:
-    names = " ".join(p.name for p in IMG_DIR.glob("*.svg"))
+def test_figure_coverage_both_clouds_and_local() -> None:
+    names = " ".join(p.name for p in IMG_DIR.glob("*.png"))
     aws = len(re.findall(r"fig-a\d", names))
     gcp = len(re.findall(r"fig-g\d", names))
     assert aws >= 5, f"only {aws} AWS figures"
@@ -207,9 +210,9 @@ def test_placeholder_coverage_both_clouds_and_local() -> None:
     assert "fig-l1-jaeger" in names and "fig-l2-grafana" in names
 
 
-def test_placeholder_table_documents_what_the_human_must_supply() -> None:
+def test_figure_table_documents_every_capture() -> None:
     table = _read(IMG_DIR / "README.md")
-    for p in IMG_DIR.glob("*.svg"):
+    for p in IMG_DIR.glob("*.png"):
         assert p.name.split(".")[0] in table, f"{p.name} not listed in img/README.md"
 
 
@@ -281,7 +284,7 @@ def test_new_docs_contain_no_secrets() -> None:
     documentation set written for this deliverable."""
     targets = [ROOT / "ARCHITECTURE.md", ROOT / "CONTRIBUTING.md", ROOT / "COST.md"]
     targets += list(ADR_DIR.glob("*.md"))
-    targets += list(IMG_DIR.glob("*.svg"))
+    targets += list(IMG_DIR.glob("*.png"))
     patterns = [rb"AKIA[0-9A-Z]{16}", rb"BEGIN (RSA|EC|OPENSSH) PRIVATE KEY", rb"aws_secret_access_key\s*=\s*\S"]
     for f in targets:
         data = f.read_bytes()
