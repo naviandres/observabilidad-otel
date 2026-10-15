@@ -187,9 +187,10 @@ versiona). Reglas que siguen vigentes sobre el PDF (comprobadas por
   `fig-...CloudWatch` no deben aparecer en el texto extraido.
 - **Extensión:** >= 5 paginas. Verifica con
   `python -c "from pypdf import PdfReader; print(len(PdfReader('docs/report/report.pdf').pages))"`.
-- **Figuras:** los ficheros marcados `PLACEHOLDER-HUMAN-REQUIRED` en
-  `docs/evidence/img/` esperan capturas reales del operador (tabla en
-  `docs/evidence/img/README.md`).
+- **Figuras:** las 14 figuras de `docs/evidence/img/` son capturas reales del
+  operador desde 2026-10-15 (los antiguos placeholders `PLACEHOLDER-HUMAN-REQUIRED`
+  fueron sustituidos por sus `.png`; la tabla de `docs/evidence/img/README.md`
+  queda como receta de re-captura).
 
 ### 9.1 Diagramas mantenidos (fuente draw.io)
 
