@@ -598,9 +598,14 @@ es el pool del pagador. El teardown obligatorio aplica igualmente.
 | Documento | Qué cubre |
 |---|---|
 | [README.md](README.md) (este) | manual de ejecución de los 4 modos |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | referencia de la arquitectura dual-cloud real: diagrama, flujo de señales, topología por nube y consecuencias de coste |
 | [COST.md](COST.md) | modelo de coste dual-cloud, listas blanca/negra, guardarraíles, procedimiento de apagado |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | toolchain fijado, referencia del Makefile (tabla target→qué hace), estilo de docs, gate anti-jerga, regeneración del PDF |
+| [docs/adr/](docs/adr) | registro de decisiones (10 ADRs: cómputo por nube, acceso, collector dual, exemplars, coste, benchmark, dashboards) |
+| [docs/report/report.pdf](docs/report/report.pdf) | reporte técnico (artefacto de edición humana; figuras en `docs/evidence/img/` y diagramas en `docs/report/diagrams/`) |
 | [docs/aws-ecs.md](docs/aws-ecs.md) | despliegue AWS/ECS Fargate en detalle: task def, contratos verificados, acceso, ADR de exemplars (A8) |
 | [docs/evidence/](docs/evidence) | evidencia en vivo por fase: línea base de coste (00), WI binding (01), sesiones de despliegue (02), correlación (03), overhead (04), dashboards (05) |
+| [docs/evidence/img/](docs/evidence/img) | figuras del reporte — **placeholders** con título/caption a la espera de las capturas humanas (tabla de qué aportar) |
 | [deploy/aws/README.md](deploy/aws/README.md) | task definition, Dockerfile de postgres y políticas IAM (tokens y permisos) |
 | [infra/README.md](infra/README.md) | Terraform dual-root: bootstrap exacto por nube, backends remotos, workspaces |
 | [Makefile](Makefile) | ciclo de vida completo (targets `aws-*`, `gcp-*`, `verify-correlation*`, `tf-*`, `cost-*`, `budget-*`) |

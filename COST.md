@@ -12,7 +12,7 @@
 
 | Concepto | Coste | Cómo se goberna |
 |---|---|---|
-| Cómputo | Task **Fargate** perfil mínimo (0.5 vCPU / 1 GB) — requisito del enunciado, pagado con créditos en **sesiones cortas** | `make aws-start/aws-stop/aws-destroy`; desired_count=0 fuera de sesión |
+| Cómputo | Task **Fargate** perfil 1 vCPU / 2 GB (`cpu 1024`/`memory 2048` de la task definition real; ≈ $0,04928/h medido en us-east-1) — requisito del enunciado, pagado con créditos en **sesiones cortas** | `make aws-start/aws-stop/aws-destroy`; desired_count=0 fuera de sesión |
 | Red | VPC + subnet pública + IGW; **sin NAT Gateway, sin ALB, sin VPC endpoints** | acceso por túnel SSM Session Manager (cifrado por el proveedor, $0) |
 | Logs | CloudWatch Logs, retención **3 días**, 1 línea INFO por evento | decisión C3 del plan (~0.4 KB/request; margen ~11× sobre el free tier) |
 | Trazas | X-Ray con sampling head 25 %; **apagado durante el benchmark** | decisión C2: coste ≈ $0 en el ciclo ABBA |
@@ -25,7 +25,7 @@
 
 | Concepto | Coste | Cómo se goberna |
 |---|---|---|
-| Cómputo | **GKE Standard zonal** (us-central1-a): fee de plano **$0.10/h** + node pool **spot e2-medium** autoscaling 0-1 | el cluster solo vive en sesiones de trabajo (`cluster_enabled=0` en reposo); `make gcp-stop` (pool a 0) / `make gcp-destroy` |
+| Cómputo | **GKE Standard zonal** (us-central1-a): fee de plano **$0.10/h** + node pool **spot e2-medium** autoscaling 0-3 (el default del `gcp-start`; 0-1 en sesiones sueltas según demanda) | el cluster solo vive en sesiones de trabajo (`cluster_enabled=0` en reposo); `make gcp-stop` (pool a 0) / `make gcp-destroy` |
 | Perfil de nodo | e2-small (2 GiB) del diseño original NO dejó arrancar los system-pods en GKE ≥ 1.36 (`Insufficient cpu`); se escaló a **e2-medium spot (4 GiB)** — la escalada que el propio plan prevé (riesgo R-08), manteniendo el descuento spot | requests de CPU del chart bajados a **20 m/pod** para caber en el nodo; limits intactos |
 | Red | VPC + subnet con **Private Google Access**; **sin Cloud NAT, sin Cloud LB** | egress a APIs de Google por PGA; acceso humano por `kubectl port-forward`/IAP |
 | Logs | Cloud Logging, retención 3 días, mismo filtro de volumen que AWS | decisión C3 |
@@ -86,8 +86,11 @@ budget.
    la lista; gasto diario ≈ $0 en la factura.
 4. Registrar la línea `delete` + `summary` en `docs/evidence/cluster-hours.csv`.
 
-**AWS** (orden): escalar el service a 0 (`aws-stop`) → `terraform destroy` del
-root AWS → verificar con `aws ce get-cost-and-usage` que el día es ≈ $0.
+**AWS** (orden): `make aws-stop` (desired_count=0) → `make aws-destroy`
+(service + cluster, con verificación de lista vacía) → `make aws-net-destroy`
+(la red tagueada); destrucción completa de la infraestructura gestionada por
+IaC: `terraform destroy` del root AWS (state S3). Verificar con
+`aws ce get-cost-and-usage` que el día es ≈ $0.
 
 **Regla operativa:** *la sesión de nube (task Fargate / cluster GKE) se
 enciende para trabajar y se destruye al terminar; el teardown y la verificación

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-label="CloudWatch Logs — entradas con trace_id por servicio">
+  <!-- PLACEHOLDER-HUMAN-REQUIRED: fichero RESERVADO para la captura real.
+       Este proyecto no genera capturas automaticas. Sustituir por la captura
+       PNG/JPEG manteniendo el nombre base del archivo. -->
+  <rect x="4" y="4" width="1272" height="712" fill="#fafafa" stroke="gray" stroke-width="2" stroke-dasharray="10 7"/>
+  <text x="640" y="130" text-anchor="middle" font-family="monospace" font-size="30" font-weight="bold" fill="crimson">PLACEHOLDER-HUMAN-REQUIRED</text>
+  <text x="640" y="200" text-anchor="middle" font-family="sans-serif" font-size="26" fill="black">Figura A3 (AWS) — CloudWatch Logs — entradas con trace_id por servicio</text>
+  <text x="90" y="330" font-family="sans-serif" font-size="17" fill="dimgray">Grupos del exportador /otel/labs/ecs-cluster/service-a y service-b con el trace_id W3C</text>
+  <text x="90" y="356" font-family="sans-serif" font-size="17" fill="dimgray">literal en el JSON del log (asercion A5).</text>
+  <text x="90" y="422" font-family="sans-serif" font-size="14" fill="gray">Consola CloudWatch -> Logs -> grupos del exportador; buscar el trace_id de la corrida de</text>
+  <text x="90" y="444" font-family="sans-serif" font-size="14" fill="gray">correlacion.</text>
+  <text x="640" y="672" text-anchor="middle" font-family="monospace" font-size="13" fill="gray">reemplazo esperado: fig-a3-cloudwatch-logs-trace-id.png (mismo nombre base)</text>
+</svg>

@@ -100,7 +100,7 @@ scan_on_push) · `aws_cloudwatch_log_group.*` (`/otel/labs/ecs-platform/*`,
 + `aws_ecs_service.otel_lab` (`desired_count` de la var `service_desired_count`).
 
 El topic `aws_sns_topic.alerts` (output `alerts_topic_arn`) es el destino común del
-budget, el anomaly monitor y las **alarmas CloudWatch de la feature #7**: el
+budget, el anomaly monitor y las **alarmas CloudWatch del dashboard nativo**: el
 cableado canónico de `AlarmActions` es
 
 ```bash
@@ -118,9 +118,9 @@ configuración exacta corría en cada sesión. La imagen ADOT
 (`deploy/collector/otelcol-contrib.dockerfile`) hornea la misma copia; el objeto
 S3 es la referencia reproducible.
 
-### guard_cost (lista negra de coste, pata AWS)
+### guard_cost (lista negra de coste, lado AWS)
 
-Mismo contrato que la pata GCP (`--provider aws`, stdin o `--plan-file`). Además
+Mismo contrato que el lado GCP (`--provider aws`, stdin o `--plan-file`). Además
 de la lista negra (`aws_lb`, `aws_nat_gateway`, `aws_vpc_endpoint`, `aws_eip`,
 `aws_eks_cluster`, `aws_db_instance`, ...) aplica
 guardarraíles condicionales sobre el propio inventario: falla si aparece un

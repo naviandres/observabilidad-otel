@@ -36,7 +36,7 @@ ECS_SERVICE     ?= otel-lab
 ECS_TASK_FAMILY ?= otel-lab
 TASK_ROLE       ?= otel-lab-task-ecs
 EXEC_ROLE       ?= otel-lab-exec-ecs
-# Topic SNS de alertas: `output alerts_topic_arn` del root infra/aws (feature #9).
+# Topic SNS de alertas: `output alerts_topic_arn` del root infra/aws (IaC fase 5).
 # Al pasarlo, `make aws-alarms` cablea AlarmActions de las alarmas a ese topic.
 # Vacio = las alarmas se crean/actualizan igual pero sin accion SNS. Obtenlo con:
 #   terraform -chdir=infra/aws output -raw alerts_topic_arn
@@ -337,14 +337,14 @@ aws-dashboard:
 # aws-alarms — 2 alarmas de guardraíl desde dashboards/cloudwatch-alarms.json
 # (ratio de error EMF y degradacion de DB como aproximacion disponible de la
 # p99; ver el JSON y docs/evidence/05-dashboards-local.md para las desviaciones).
-# Idempotente via put-metric-alarm. AlarmActions -> topic SNS del IaC (#9) si se
+# Idempotente via put-metric-alarm. AlarmActions -> topic SNS del IaC (fase 5) si se
 # pasa SNS_TOPIC_ARN (output `alerts_topic_arn`); sin el, la alarma se crea/actualiza
 # igual pero sin accion SNS.
 aws-alarms:
 	pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE) -SnsTopicArn "$(SNS_TOPIC_ARN)"
 
 # ===========================================================================
-# Guardarrailes de coste de la pata AWS (PLAN §3.5 / §5.A).
+# Guardarrailes de coste del lado AWS (PLAN §3.5 / §5.A).
 # ===========================================================================
 
 # tf-validate-aws — init sin backend + fmt -check + validate (lo mismo que
@@ -407,6 +407,7 @@ validate-collector:
 	docker run --rm -v "$$(pwd)/deploy/collector:/cfg" \
 	  otel/opentelemetry-collector-contrib:0.162.0 \
 	  validate --config=/cfg/otel-collector-local.yaml
+
 
 # ===========================================================================
 # Verificacion de correlacion (PLAN 3.A). El framework decide su salida:
