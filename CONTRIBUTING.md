@@ -181,6 +181,19 @@ La fuente única es `docs/report/report.md`; el PDF es un artefacto:
 make report    # docker run pandoc/latex (tag fijado) -> docs/report/report.pdf
 ```
 
+Cadena canónica y sus dos reglas anti-defecto (validación humana 2026-10-15):
+
+- **Numeración:** la pone el generador (`--number-sections`); los headings del
+  .md van SIN números manuales (si no, salen duplicados tipo "4. 4. Título").
+  Los apéndices usan `{.unnumbered}`.
+- **Tablas densas:** los anchos relativos de columna se fijan en el .md con el
+  número de guiones de la fila separadora (`|----|--------|`), y
+  `docs/report/pdf-preamble.tex` (vía `--include-in-header`) aplica
+  `\small\raggedright` + `\emergencystretch` dentro de tablas. Tokens largos
+  (`a/b/c`) se escriben separados con espacios o se parten, si no desbordan la
+  celda. Verificación: compilar y exigir 0 `Overfull \hbox` en el log de
+  XeLaTeX.
+
 Requisitos: Docker en marcha y la imagen del tag fijado (se descarga sola).
 Las figuras referenciadas viven en `docs/evidence/img/`; los ficheros marcados
 `PLACEHOLDER-HUMAN-REQUIRED` esperan capturas reales del operador (ver la

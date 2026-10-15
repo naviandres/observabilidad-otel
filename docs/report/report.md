@@ -5,7 +5,7 @@ date: "2026-10-15"
 lang: es
 ---
 
-# 1. Portada y resumen ejecutivo
+# Portada y resumen ejecutivo
 
 **Qué se construyó.** Un pipeline de observabilidad *end-to-end* con
 OpenTelemetry sobre **dos nubes simultáneas**: dos microservicios FastAPI
@@ -46,40 +46,41 @@ acumulado registrado en las sesiones de nube es del orden de **$3,4 USD** en
 concepto de cómputo/ingesta medible, dentro de los guardarraíles
 ($1/día AWS; budget COP 964 461 en GCP; gate de 150 h de task).
 
-# 2. Arquitectura
+# Arquitectura
 
-## 2.1 Diagrama dual-cloud
+## Diagrama dual-cloud
 
 ```
-                        +--------------------------------------------+
-                        |              MODO DUAL (A13)               |
-                        |  service-a (ECS Fargate, AWS)              |
-                        |      | HTTP /inventory/reserve              |
-                        |      v  INVENTORY_URL → LB regional         |
-                        |  service-b (GKE Standard, GCP) -- SQL --> postgres
-                        +--------------------------------------------+
+MODO DUAL (A13) -- el trace_id cruza la frontera de nubes:
+  service-a (ECS Fargate, AWS)
+     |  HTTP /inventory/reserve
+     v  INVENTORY_URL -> LB regional (GCP)
+  service-b (GKE Standard, GCP) -- SQL --> postgres (GKE)
 
-  AWS (modo mono)                         GCP (modo mono)
-  -----------------                       -----------------
-  service-a :8000 --+                     service-a (ClusterIP) --+
-                    | (awsvpc, localhost)                          |
-  service-b :8001 --+                     service-b :8001 --------+
-     | SQL          |                        | SQL                 |
-  postgres <--------+                     postgres <--------------+
+MODO AWS (mono) -- una task Fargate awsvpc:
+  service-a :8000 -> service-b :8001 -> postgres :5432 (localhost)
+  collector ADOT v0.46.0 (mismo namespace de red):
+     +- awsxray            -> X-Ray
+     +- awsemf             -> CloudWatch EMF
+     +- awscloudwatchlogs  -> CloudWatch Logs
+     +- prometheus :8889   (scrape local)
+  sidecar cloudwatch-agent -> metricas ECS
 
-  collector ADOT v0.46.0 (misma task)     collector contrib 0.162.0 (pod Helm)
-    +- awsxray ---------> X-Ray             +- googlecloud --> Cloud Trace
-    +- awsemf ----------> CloudWatch EMF    |                  (fan-out) -> Jaeger UI (pod)
-    +- awscloudwatchlogs> CloudWatch Logs   +- googlemanagedprometheus -> Cloud Monitoring
-    +- prometheus :8889                     +- (fluent-bit/GKE) --------> Cloud Logging
-  sidecar cloudwatch-agent -> ECS metrics   +- prometheus exporter :8889
+MODO GCP (mono) -- namespace otel-lab (Helm):
+  service-a -> service-b :8001 -> postgres :5432 (ClusterIP)
+  collector contrib 0.162.0:
+     +- googlecloud             -> Cloud Trace
+     |    (fan-out) otlphttp    -> Jaeger UI (pod en-cluster)
+     +- googlemanagedprometheus -> Cloud Monitoring
+     +- (fluent-bit/GKE)        -> Cloud Logging
+     +- prometheus exporter :8889
 ```
 
 La versión mantenida de este diagrama, con el detalle de cada pieza, está en
 `ARCHITECTURE.md`; las decisiones de topología y sus alternativas, en los ADRs
 enlazados abajo.
 
-## 2.2 Flujo de una request
+## Flujo de una request
 
 Un `POST /orders` con `traceparent` W3C inyectado por el cliente recorre:
 spans de negocio en service-a (`order.process` → `order.validate`,
@@ -88,11 +89,11 @@ service-b (`POST /inventory/reserve` → `inventory.query` → `SELECT/UPDATE
 inventory`; `payment.gateway_call`), y SQL en ambos lados. El mismo `trace_id`
 aparece en spans, en los logs JSON (structlog, inyectado por el SDK) y en los
 contadores/histogramas; los exemplars métrica→traza se sirven desde el scrape
-**de la aplicación** (`:8000/metrics`, OpenMetrics — §5.3 y ADR-007). En modo
+**de la aplicación** (`:8000/metrics`, OpenMetrics — §5.1 y ADR-007). En modo
 dual, el salto service-a→service-b cruza la frontera de nube y las señales
 quedan indexadas en los backends de **ambas** nubes.
 
-## 2.3 Topología del collector: Fargate y GKE
+## Topología del collector: Fargate y GKE
 
 - **AWS**: el collector es un contenedor más de la task (5 contenedores en
   1 vCPU/2 GB; reservas 1024 CPU/1920 MB, `docs/aws-ecs.md` §3). El YAML va
@@ -109,10 +110,10 @@ quedan indexadas en los backends de **ambas** nubes.
   verificado en vivo); `kubectl port-forward` autenticado en GCP. SG/firewall
   en steady state con **0 ingress**, verificado tras cada revoke.
 
-## 2.4 Alternativas evaluadas, con su precio
+## Alternativas evaluadas, con su precio
 
 | Nube | Opción | Coste relevante | Veredicto |
-|---|---|---|---|
+|---|------|-----------|-----------|
 | AWS | **ECS Fargate** (task 1 vCPU/2 GB) | aprox. **$0.04928/h** medido; $0 con desired_count=0 | **Elegida** (requisito del enunciado; ADR-002) |
 | AWS | EC2 sobre ECS | nodo 24/7 aunque la sesión duerma | Descartada |
 | AWS | EKS | control plane + complejidad | **Vetada** (lista negra) |
@@ -122,15 +123,15 @@ quedan indexadas en los backends de **ambas** nubes.
 | GCP | GKE Autopilot | reserva por pod 24/7, sin spot | **Vetada** (lista negra) |
 | GCP | Cloud Run | min-instances>0 facturable | **Vetada** |
 | GCP | Cloud NAT | ~$0.0475/h + GB | **Vetada**; Private Google Access ($0) |
-| GCP | Cloud LB gestionado permanente | regla de forwarding + datos | **Vetada**; LB regional **solo** durante el modo dual (~$0 en el lab: sin cargo horario de regla, <$0.01 de datos) |
-| GCP | nodo e2-small (plan original) | ~$0.006/h spot | **Insuficiente en GKE >= 1.36** (system pods ~856m); e2-medium ~$0.012/h — ADR-005 |
+| GCP | Cloud LB gestionado permanente | regla de forwarding + datos | **Vetada**; el LB regional solo vive en el modo dual (<$0.01 de datos en el lab) |
+| GCP | nodo e2-small (plan original) | ~$0.006/h spot | e2-small no cabe en GKE 1.36 (system pods ~856m); e2-medium ~$0.012/h — ADR-005 |
 
-**Figuras de esta sección** (placeholders pendientes de captura humana;
-índice completo en `docs/evidence/img/README.md`): Figura A5 — task Fargate
-con 5 contenedores (`fig-a5-ecs-service-tasks`); Figura G5 — workloads GKE
-(`fig-g5-gke-workloads`).
+**Figuras de esta sección** (placeholders pendientes de captura humana; el
+índice está en la carpeta docs/evidence/img): Figura A5 — task Fargate con
+5 contenedores (fig-a5-ecs-service-tasks); Figura G5 — workloads GKE
+(fig-g5-gke-workloads).
 
-# 3. Instrumentación
+# Instrumentación
 
 - **Un único motor por servicio** (`app/telemetry.py`): registra auto-
   instrumentación FastAPI/uvicorn/httpx/SQLAlchemy/psycopg2/logging, crea el
@@ -140,10 +141,11 @@ con 5 contenedores (`fig-a5-ecs-service-tasks`); Figura G5 — workloads GKE
 - **Propagadores**: W3C TraceContext (canónico) + X-Ray (`opentelemetry-
   propagator-aws`) + `X-Cloud-Trace-Context` (`propagator-gcp`) en compuesto,
   para que el contexto viaje por ambas nubes (PLAN L40).
-- **Spans custom de negocio** (no solo HTTP): `order.process/validate/persist`,
-  `inventory.reserve`, `payment.authorize/gateway_call`, `inventory.query` —
-  visibles en el waterfall de Jaeger en GKE (traza real: 23 spans, raíz
-  `POST /orders` aprox. 250 ms, `docs/evidence/04-jaeger-gcp.md`).
+- **Spans custom de negocio** (no solo HTTP): `order.process`, `order.validate`,
+  `order.persist`, `inventory.reserve`, `payment.authorize`, `payment.gateway_call`,
+  `inventory.query` — visibles en el waterfall de Jaeger en GKE (traza real:
+  23 spans, raíz `POST /orders` aprox. 250 ms,
+  `docs/evidence/04-jaeger-gcp.md`).
 - **Driver PostgreSQL**: `psycopg2-binary==2.9.13` con SQLAlchemy 2.0
   (ADR-001); los spans SQL salen por instrumentación, no a mano.
 - **Sampling**: `parentbased_traceidratio` env-configurable — 1.0 para
@@ -152,37 +154,37 @@ con 5 contenedores (`fig-a5-ecs-service-tasks`); Figura G5 — workloads GKE
 - **Logs**: structlog JSON con `trace_id`/`span_id` inyectados por el SDK;
   `access_log` de uvicorn desactivado; PII redactada también en el collector
   (`attributes/redact`).
-- **Cardinalidad**: `order.id`, `user`, `trace_id` nunca como label de
-  métrica (test `test_cardinality.py`); el dashboard de 6 paneles vive en
-  Prometheus porque `GetMetricData` de CloudWatch se cobra siempre (decisión
-  C1).
+- **Cardinalidad**: `order.id`, `user` y `trace_id` nunca como label de
+  métrica (cubierto por `test_cardinality.py`); el dashboard de 6 paneles
+  lee de Prometheus porque `GetMetricData` de CloudWatch se cobra siempre
+  (decisión C1).
 - **Exemplars**: el SDK los emite, pero el puente métrica→traza se sirve por
   la vía app-level (histograma `http_server_duration_milliseconds` con
-  `exemplar={"trace_id","span_id"}` vía OpenMetrics) — ADR-007, §5.3.
+  `exemplar={"trace_id","span_id"}` vía OpenMetrics) — ADR-007, §5.1.
 
-# 4. Configuración y despliegue del Collector
+# Configuración y despliegue del Collector
 
-## 4.1 Pipeline AWS (ADOT v0.46.0) — exporter a exporter
+## Pipeline AWS (ADOT v0.46.0) — exporter a exporter
 
 | Pieza | Justificación | Coste por nube |
-|---|---|---|
+|----------|------------|---------|
 | receiver `otlp` (gRPC :4317) + `prometheus` (autotelemetría :8888) | entrada estándar del SDK + scrape propio | $0 |
-| `memory_limiter → resourcedetection(ecs) → resource → attributes/redact → batch` | protección de memoria de la task; `cloud.provider`/`deployment.environment` normalizados; PII fuera; amortización de red OTLP | $0 (CPU dentro del perfil de task) |
+| `memory_limiter → resourcedetection(ecs) → resource → attributes/redact → batch` | protección de memoria de la task; `cloud.provider` / `deployment.environment` normalizados; PII fuera; amortización de red OTLP | $0 (CPU dentro del perfil de task) |
 | `awsxray` | trazas gestionadas AWS; **apagado en benchmark** (C2) | $0 en campaña (demostrado); free tier 100k trazas/mes |
 | `awsemf` con `filter/cloudwatch-metrics` (whitelist **4** contadores) + `NoDimensionRollup` | free tier de métricas custom (10); el rollup implícito generaba **26 variantes** por contador → 1 | aprox.$0 dentro de free tier |
 | `awscloudwatchlogs` | logs a grupos `/otel/labs/*` con retención **3 días** | $0.50/GB ingest — acotado por C3 (~0.4 KB/request) |
 | `prometheus` (`:8889`) | el hub de correlación local lee de aquí | $0 |
-| `prometheusremotewrite`/`otlphttp/tempo`/`otlphttp/loki` (Grafana Cloud) | opcional **aplazada** (decisión local-only 2026-10-11); placeholders example.com fallando a propósito | $0 (no contratado) |
-| sidecar `cloudwatch-agent` (`essential:false`) | métricas ECS — ADOT v0.46.0 no trae `hostmetrics`/`transform` (desviación R-09) | aprox.$0 (métricas de plataforma no tarifadas) |
+| `prometheusremotewrite` / `otlphttp/tempo` / `otlphttp/loki` (Grafana Cloud) | opcional **aplazada** (local-only); placeholders example.com fallando a propósito | $0 (no contratado) |
+| sidecar `cloudwatch-agent` (`essential:false`) | métricas ECS — ADOT v0.46.0 no trae `hostmetrics` / `transform` (desviación R-09) | aprox.$0 (métricas de plataforma no tarifadas) |
 
 **Validación**: ADOT no tiene subcomando `validate` → se valida **por arranque
 limpio** ("Everything is ready…"); contrib sí → `validate`. Ambos binarios, en
 `make validate-collector` y en CI (ADR-006).
 
-## 4.2 Pipeline GCP (contrib 0.162.0 / GCP-distro)
+## Pipeline GCP (contrib 0.162.0 / GCP-distro)
 
 | Pieza | Justificación | Coste por nube |
-|---|---|---|
+|----------|------------|---------|
 | `googlecloud` (trazas+logs+métricas) | Cloud Trace **preserva el ID W3C** (sin traducción tipo X-Ray); Cloud Logging con `jsonPayload.trace_id`; Cloud Monitoring | free allotments: 2,5M spans/mes; 50 GiB logs/mes |
 | `googlemanagedprometheus` | series Prometheus gestionadas para el dashboard de 6 paneles GCP | $0.06/M samples, sin allotment — volumen del lab aprox. $0 |
 | fan-out `otlphttp/jaeger-gcp` | Jaeger UI navegable **en-cluster** (`docs/evidence/04-jaeger-gcp.md`) | nodo spot (marginal) |
@@ -198,7 +200,7 @@ privilege (cloudtrace.agent, logWriter, metricWriter…). Secreto `pg-password`
 montado por CSI Secret Manager **habilitado en el create** (ADR-005: el
 update post-create cuesta ~40 min de `UPGRADE_NODES`).
 
-## 4.3 Versionado y validación en CI
+## Versionado y validación en CI
 
 Cuatro YAMLs versionados (`otel-collector-{local,aws,gcp,bench}.yaml`) con
 tags exactos de imagen (nunca `:latest`); el binario correcto valida cada
@@ -206,9 +208,9 @@ config; la copia de auditoría del YAML aplicado se archiva en S3/GCS con clave
 = SHA-256 (paridad entre el chart, el deploy y el bucket: hash verificado byte
 a byte en la resesión del 2026-10-11).
 
-# 5. Correlación cross-signal
+# Correlación cross-signal
 
-## 5.1 Mecanismo
+## Mecanismo
 
 Pivote: el `trace_id` W3C (32 hex). Tres vías de enlace:
 
@@ -228,10 +230,10 @@ Pivote: el `trace_id` W3C (32 hex). Tres vías de enlace:
    encadenado), no por string. En Cloud Trace los IDs se preservan literales
    (A10 por igualdad directa).
 
-## 5.2 La prueba: 13/13 en la unión de corridas
+## La prueba: 13/13 en la unión de corridas
 
 | # | Aserción | Resultado | Corrida |
-|---|---|---|---|
+|--|----------------|-----|-------|
 | A1 | traceparent W3C inyectado en POST /orders | **PASS** | corrA8 |
 | A2 | header `x-trace-id` de respuesta == trace | **PASS** | corrA8 |
 | A3 | X-Ray: segmentos a/b con parent correcto (por estructura) | **PASS** | corrA8 |
@@ -257,9 +259,9 @@ corresponde) — el cierre de fase es la unión documentada, no una corrida
 waterfall), G2 (Cloud Logging), G4 (Jaeger en GKE) — placeholders en
 `docs/evidence/img/`.
 
-# 6. Análisis de overhead
+# Análisis de overhead
 
-## 6.1 Metodología
+## Metodología
 
 Campaña **ABBA** contra el stack local (compose), k6 en Docker (50→100 VU,
 warmup + 5 min steady), 3 réplicas por variante, precalentamiento 60 s,
@@ -270,10 +272,10 @@ pipeline de trazas del collector en sink `nop` (C2). Runs de atribución con
 sampling 1.0 y 0.0. Coste por nube leído del **ingest real de logs** de B con
 las compuertas `OTEL_BENCH_{AWS,GCP}_LOGS` abiertas — sin sesión de cómputo.
 
-## 6.2 Resultados
+## Resultados
 
 | Métrica | A (media) | B (media) | overhead |
-|---|---|---|---|
+|---------|------|------|------|
 | p99 latencia | 1750,74 ms | 1837,20 ms | **+4,94 %** |
 | p50 latencia | aprox.968,6 ms | aprox.1186,7 ms | **+22,5 %** |
 | CPU host (% no-idle) | 12,45 % | 13,27 % | +6,62 % |
@@ -285,7 +287,7 @@ Atribución (p99): sampling 1.0 = 1788 ms; sampling 0.0 = 1617 ms; A = 1751 ms
 → generación+export de spans aprox. **9,75 %** del p99 base; "contexto/propagación"
 sale **−7,62 %** — **artefacto del outlier, no un resultado**.
 
-## 6.3 Ruido, límites y lectura honesta
+## Ruido, límites y lectura honesta
 
 - **Outlier declarado**: A1 (primer run) = 2561 ms vs A2/A3 = 1249/1442 ms;
   desviación entre réplicas de A (708 ms) **mayor que el overhead que se
@@ -306,7 +308,7 @@ sale **−7,62 %** — **artefacto del outlier, no un resultado**.
 - Discusión (por qué trazas > métricas, batching, sampling como palanca
   dominante, dimensionamiento): `docs/evidence/04-overhead.md`.
 
-## 6.4 Recomendaciones de tuning
+## Recomendaciones de tuning
 
 1. Bajar el sampling en producción (0.25 demostró ser la palanca dominante);
    usar 0.0 solo con conciencia de que contexto/propagadores siguen activos.
@@ -319,9 +321,9 @@ sale **−7,62 %** — **artefacto del outlier, no un resultado**.
 run, $0.50/GB); GCP $0,0000 (15-72 MB/run dentro de los 50 GB/mes libres);
 X-Ray/Cloud Trace **$0 demostrado**. Campaña total < $0,50.
 
-# 7. Presupuesto y control de coste
+# Presupuesto y control de coste
 
-## 7.1 Líneas base verificadas
+## Líneas base verificadas
 
 - **AWS** (`docs/evidence/00-aws-baseline.md`, 2026-10-11): créditos $100
   (dato declarado — no hay API de saldo); 16 recursos de lista blanca
@@ -342,11 +344,11 @@ X-Ray/Cloud Trace **$0 demostrado**. Campaña total < $0,50.
   por-cuenta son proxy; el techo real es el pool del pagador (paso humano
   pendiente: budget payer-level).
 
-## 7.2 Guardarraíles implementados
+## Guardarraíles implementados
 
 | Guardarrail | Mecanismo | Verificación |
-|---|---|---|
-| Lista negra por proveedor | `guard_cost.py --provider aws|google` sobre el JSON del plan | en pre-commit, en CI de ambos roots y **antes del apply** en el workflow `deploy` |
+|--------|--------------|-------------|
+| Lista negra por proveedor | `guard_cost.py --provider aws\|google` sobre el JSON del plan | en pre-commit, en CI de ambos roots y **antes del apply** en el workflow `deploy` |
 | Techo diario AWS | budget $1/día (IaC + CLI) con alertas 80/100 % + SNS | `describe-budgets` volcado en evidencia |
 | Techo GCP | budget COP 964 461, umbrales 50-150 % | `billing budgets describe` en evidencia |
 | Horas de task Fargate | gate de **150 h/mes** (`make budget-hours` + `instance-hours.csv`) | 28,21 h acumuladas / 150 h al cierre de IaC; exit 0 |
@@ -356,10 +358,10 @@ X-Ray/Cloud Trace **$0 demostrado**. Campaña total < $0,50.
 | Precondition de región | `precondition` (aborta) + `check` (avisa) en ambos roots | plan en us-west-2 aborta (verificado) |
 | Teardown DoD | `aws-destroy`/`gcp-destroy` con verificación + registro CSV | todas las sesiones cerradas con lista vacía |
 
-## 7.3 Coste real del mes (por proveedor, desde los CSVs de evidencia)
+## Coste real del mes (por proveedor, desde los CSVs de evidencia)
 
 | Concepto | AWS | GCP |
-|---|---|---|
+|-----------|----------|--------------|
 | Cómputo de sesiones | $0,672 (13,55 h de task Fargate acumuladas) | $2,68 de fee de plano (26,82 h × $0,10) + nodo spot marginal (~$0,17-0,20 en las sesiones largas) |
 | Ingesta de señales (bench + correlación) | $0,143 (logs; trazas $0) | $0,000 (logs dentro de free tier; trazas $0) |
 | Sesión de correlación dual (12-oct) | ~$0,67 (incluye pausa de 9,2 h con task activa) | ~$1,6 (incluye la misma pausa facturando fee de plano) |
@@ -374,14 +376,14 @@ informada.
 
 **Figuras**: A6 (AWS Budgets + anomaly), G6 (GCP budget), A4 (dashboard EMF).
 
-# 8. Mapeo dual-cloud y desviaciones restantes
+# Mapeo dual-cloud y desviaciones restantes
 
 | Concepto | AWS | GCP | Nota |
-|---|---|---|---|
+|-------|-----------|-----------|---------------|
 | Cómputo | ECS Fargate (task única) | GKE Standard (pool spot) | perfiles 1 vCPU/2 GB <-> e2-medium |
 | Registro de imágenes | ECR (IMMUTABLE, keep-last-5) | Artifact Registry (cleanup 7 d/keep-5) | paridad exacta |
 | Secretos | SSM Parameter Store (Standard) | Secret Manager + CSI | nunca Secrets Manager (lista negra) <-> nunca claves JSON |
-| Identidad del workload | task role + `resourcedetection/ecs` | Workload Identity + `resourcedetection/gcp` | paridad funcional |
+| Identidad del workload | task role + `resourcedetection` (ecs) | Workload Identity + `resourcedetection` (gcp) | paridad funcional |
 | Trazas | X-Ray (ID traducido → verificación estructural) | Cloud Trace (ID W3C preservado) | **desviación mínima inevitable** |
 | Logs | CloudWatch Logs (exporter OTel) | Cloud Logging (fluent-bit + OTLP) | doble vía en GCP |
 | Métricas | EMF (whitelist 4 contadores) | Cloud Monitoring + Managed Prometheus | GMP sin allotment free (volumen aprox. $0) |
@@ -389,7 +391,7 @@ informada.
 | Acceso humano | /32 temporal (SSM port-forward **no existe**) | port-forward autenticado | ambos sin ingress permanente |
 | Entrada pública | ninguna (IGW + IP efímera) | LB regional solo en modo dual | asimetría admitida: el cruce AWS→GCP necesita un destino |
 | Budget | $1/día + $100/mes + anomaly + SNS | COP 964 461, 50-150 %, EXCLUDE_ALL_CREDITS | monedas distintas por diseño |
-| State IaC | S3 + locking nativo (`use_lockfile`) | GCS + versioning (sin bucket de locks) | workspaces `lab|bench` en ambos |
+| State IaC | S3 + locking nativo (`use_lockfile`) | GCS + versioning (sin bucket de locks) | workspaces `lab\|bench` en ambos |
 
 Desviaciones restantes, todas declaradas con su evidencia: (1) traducción de
 ID en X-Ray (ADR implícito en §5.1, A3/A4 por estructura); (2) perfil de nodo
@@ -402,7 +404,7 @@ state GCP **sin lifecycle** a propósito (borrar el state rompería
 locking/auditabilidad); (6) las 14 figuras del reporte son **placeholders**
 pendientes de captura humana (índice en `docs/evidence/img/README.md`).
 
-# 9. Conclusiones y trabajo futuro
+# Conclusiones y trabajo futuro
 
 **Conclusiones.** (1) El pipeline dual-cloud funciona: tres señales, dos
 nubes, correlación **demostrada** con 13/13 aserciones y un `trace_id` que
@@ -427,7 +429,7 @@ trabajo futuro.
 
 ---
 
-## Apéndice A — Índice de ADRs
+## Apéndice A — Índice de ADRs {.unnumbered}
 
 Todos en [`docs/adr/`](../adr): 001 driver psycopg2 · **002** cómputo AWS
 Fargate (proveedor AWS) · **003** acceso sin túnel SSM (proveedor AWS) ·
@@ -436,7 +438,7 @@ Fargate (proveedor AWS) · **003** acceso sin túnel SSM (proveedor AWS) ·
 app-level · **008** modelo de coste créditos+guardarraíles · **009** sampling
 0.25 y trazas OFF · **010** dashboards nativos bajo límites de API.
 
-## Apéndice B — Figuras (placeholders pendientes de captura humana)
+## Apéndice B — Figuras (placeholders pendientes de captura humana) {.unnumbered}
 
 Este reporte no incluye capturas porque el agente no captura pantallas: cada
 figura está **reservada** en `docs/evidence/img/` con título, caption e
@@ -444,7 +446,7 @@ instrucciones. El humano sustituye el `.svg` por el `.png` real (mismo nombre
 base) y regenera con `make report`.
 
 | ID | Fichero | Título |
-|---|---|---|
+|--|--------------|----------------|
 | L1 | `fig-l1-jaeger-local-waterfall` | Jaeger UI (local) — waterfall a→b→DB |
 | L2 | `fig-l2-grafana-slo-6-paneles` | Grafana OSS — dashboard SLO 6 paneles |
 | A1 | `fig-a1-xray-service-map` | X-Ray — service map |
@@ -460,7 +462,7 @@ base) y regenera con `make report`.
 | G5 | `fig-g5-gke-workloads` | GKE — workloads del release otel-lab |
 | G6 | `fig-g6-gcp-budget-alerts` | GCP Budget — EXCLUDE_ALL_CREDITS |
 
-## Apéndice C — Reproducibilidad
+## Apéndice C — Reproducibilidad {.unnumbered}
 
 - Ejecución de los 4 modos: `README.md` (manual único). Modelo de coste y
   apagado: `COST.md`. Arquitectura de referencia: `ARCHITECTURE.md`.

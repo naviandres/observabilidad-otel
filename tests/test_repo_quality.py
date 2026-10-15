@@ -110,6 +110,38 @@ def test_report_markdown_is_the_source_and_covers_both_clouds() -> None:
         assert token in text, f"report source does not mention {token}"
 
 
+def test_report_headings_have_no_manual_numbers() -> None:
+    """The generator (--number-sections) is the canonical numbering; manual
+    numbers in the source produced doubled titles like '4. 4. Configuración'."""
+    for line in _read(REPORT_MD).splitlines():
+        if line.startswith("#"):
+            assert not re.match(r"^#{1,4} \d", line), f"manually numbered heading: {line}"
+
+
+def test_report_pdf_has_no_doubled_heading_numbers() -> None:
+    """End-to-end guard: no extracted PDF line may show 'N. N.' / 'N.M. N.M'
+    before a title."""
+    from pypdf import PdfReader
+
+    text = "\n".join((page.extract_text() or "") for page in PdfReader(str(REPORT_PDF)).pages)
+    doubled = re.findall(r"(\d+(?:\.\d+)?)\.\s+\1\s+[A-ZÁÉÍÓÚÑ]", text)
+    assert not doubled, f"doubled section numbers in PDF: {doubled}"
+
+
+def test_report_pdf_tables_have_no_overlapping_cells() -> None:
+    """Regression for the human-review defect: adjacent table cells were
+    extracted glued together (e.g. 'fig-a3-...trace-idCloudWatch') because
+    overflowing columns overlapped. The fixed pipeline (proportional column
+    widths + pdf-preamble.tex) must not produce glued tokens: a figure
+    filename token must never be immediately followed by uppercase prose in
+    the same extracted string."""
+    from pypdf import PdfReader
+
+    text = "\n".join((page.extract_text() or "") for page in PdfReader(str(REPORT_PDF)).pages)
+    glued = re.findall(r"fig-[a-z0-9-]*(?:[a-z]|\d)[A-ZÁÉÍÓÚÑ]", text)
+    assert not glued, f"glued overlapping-cell artifacts: {glued[:5]}"
+
+
 def test_report_declares_overhead_and_limitations() -> None:
     text = _read(REPORT_MD)
     assert "4,94" in text, "headline overhead figure missing"
@@ -209,7 +241,7 @@ GATE_PATTERNS = [
 ]
 GATE_DIRS = ["docs", "deploy", "dashboards", "helm", "infra", "k6", "scripts", "bench"]
 GATE_ROOT_FILES = ["README.md", "COST.md", "ARCHITECTURE.md", "Makefile", ".env.example"]
-GATE_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".tf", ".txt", ".csv", ".ps1", ".py", ".sh", ".sql"}
+GATE_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".tf", ".txt", ".csv", ".ps1", ".py", ".sh", ".sql", ".tex"}
 # CONTRIBUTING.md documents the gate itself (it must quote the forbidden
 # tokens); the raw credentials dump of Phase 0 is a CLI volcado, not docs.
 GATE_EXCLUDED_NAMES = {"00-credentials.txt"}
