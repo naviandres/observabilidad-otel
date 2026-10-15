@@ -225,8 +225,9 @@ real y los comandos de bootstrap están en [infra/README.md](infra/README.md).
 
 ### Coste estimado
 
-Task Fargate 0.5 vCPU/1 GB ≈ **$0.049/h** mientras `desired_count=1`; fuera de
-sesión ≈ $0. Presupuesto AWS: **$100 de créditos** con umbral diario $1
+Task Fargate **1 vCPU / 2 GB** (los `cpu: "1024"` / `memory: "2048"` de
+[`deploy/aws/task-definition.json`](deploy/aws/task-definition.json)) ≈
+**$0.049/h** mientras `desired_count=1`; fuera de sesión ≈ $0. Presupuesto AWS: **$100 de créditos** con umbral diario $1
 (`aws_budget` en IaC) y gate de **150 h de task** (`make budget-hours`,
 [`docs/evidence/instance-hours.csv`](docs/evidence/instance-hours.csv)). El
 modelo completo, por concepto, en [COST.md](COST.md) §1.
@@ -551,7 +552,7 @@ días). Los modos nube operan **dentro de créditos con guardarraíles**, no
 | Recursos prohibidos | `make tf-plan-aws` → `scripts/guard_cost.py` (lista negra: ALB, NAT, VPC endpoints, EKS, RDS, Secrets Manager…) | `guard_cost.py --provider google` (Cloud NAT, Autopilot, LB gestionado, Cloud SQL, pools no-spot…) |
 | Botón de parada | `make aws-stop` (desired_count=0) | `make gcp-stop` (pool a 0; **el fee de plano sigue**) |
 | Botón de destrucción (DoD) | `make aws-destroy` + verificación | `make gcp-destroy` + verificación |
-| Cómputo en sesión | Fargate 0.5 vCPU/1 GB ≈ $0.049/h | fee $0.10/h + spot e2-medium ≈ $0.04/h/nodo (autoscaling 0–3) |
+| Cómputo en sesión | Fargate 1 vCPU/2 GB ≈ $0.049/h | fee $0.10/h + spot e2-medium ≈ $0.04/h/nodo (autoscaling 0–3) |
 | Fuera de sesión | ≈ $0 | ≈ $0 (solo si el cluster está **destruido**) |
 
 **Decisión de billing (2026-10-11):** la cuenta del lab es **miembro** de una
