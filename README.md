@@ -1,33 +1,94 @@
-# observabilidad-otel
+# observabilidad-otel — Manual de ejecución
 
-Pipeline de observabilidad end-to-end con OpenTelemetry: `service-a` → `service-b`
-→ PostgreSQL, con OTel Collector, Jaeger, Prometheus y Grafana en local ($0).
+Pipeline de observabilidad **end-to-end con OpenTelemetry dual-cloud**:
+`service-a` → `service-b` → PostgreSQL instrumentados con el SDK de OTel, un
+**Collector** (contrib en local/GCP, ADOT en AWS) que enruta trazas, métricas y
+logs a los backends de cada nube, y **correlación cross-signal por `trace_id`
+W3C que cruza AWS↔GCP**. El código de aplicación es idéntico en los cuatro
+modos; solo cambian el cómputo, el YAML del collector y las variables de
+entorno.
 
-## Requisitos
+Este README es el **único manual de ejecución**: un evaluador externo puede
+reproducir los cuatro modos solo con este documento. Las cifras de coste y los
+guardarraíles están en [COST.md](COST.md); el detalle del despliegue AWS en
+[docs/aws-ecs.md](docs/aws-ecs.md); la evidencia en vivo de cada fase en
+[`docs/evidence/`](docs/evidence).
 
-- Docker + Docker Compose v2.
-- Opcional (desarrollo sin Docker): Python 3.12 y `pip install -r requirements.txt`.
+## Índice
 
-## Arranque rápido (stack completo)
+- [Los cuatro modos](#los-cuatro-modos-resumen)
+- [Modo 1 — Local (docker compose)](#modo-1--local-docker-compose)
+- [Modo 2 — AWS (ECS Fargate)](#modo-2--aws-ecs-fargate)
+- [Modo 3 — GCP (GKE Standard)](#modo-3--gcp-gke-standard)
+- [Modo 4 — Dual-cloud (AWS + GCP simultáneo)](#modo-4--dual-cloud-aws--gcp-simultáneo)
+- [Secciones comunes](#secciones-comunes)
+  - [Dashboards SLO](#dashboards-slo-provisioning-por-código-nunca-a-mano)
+  - [Benchmark de overhead](#benchmark-de-overhead)
+  - [Imágenes (tags fijados)](#imágenes-tags-fijados-sin-latest)
+- [Tabla de coste / créditos y guardarraíles por nube](#tabla-de-coste--créditos-y-guardarraíles-por-nube)
+- [Troubleshooting](#troubleshooting)
+- [Mapa de documentación del repo](#mapa-de-documentación-del-repo)
 
-Desde esta carpeta:
+## Los cuatro modos (resumen)
+
+| | **1. Local** | **2. AWS** | **3. GCP** | **4. Dual-cloud** |
+|---|---|---|---|---|
+| Dónde corre | `docker compose` en tu PC | ECS **Fargate** (task única, `awsvpc`) | **GKE Standard** zonal (pool spot, Helm) | service-a en ECS → service-b en GKE |
+| Collector | contrib `0.162.0` (`otel-collector-local.yaml`) | **ADOT** `v0.46.0` (`otel-collector-aws.yaml`) | contrib (`otel-collector-gcp.yaml`) | el de cada nube, simultáneamente |
+| Trazas | Jaeger | X-Ray | Cloud Trace | **el mismo `trace_id` en X-Ray y Cloud Trace** |
+| Logs | stdout → collector → Jaeger/Prom | CloudWatch Logs | Cloud Logging | ambos backends |
+| Métricas | Prometheus + Grafana OSS | CloudWatch EMF (+ dashboard nativo) | Cloud Monitoring / Managed Prometheus | ambos |
+| Coste | **$0** | dentro de $100 de créditos, con teardown | dentro de $300 de créditos (90 días), con teardown | ≈ $0.35 por sesión de 2 h |
+| Toolchain | Docker + Compose v2 | aws CLI, docker, make, pwsh | gcloud, docker, kubectl, helm, make | ambas |
+| Ciclo | `up` / `down` | `aws-push → aws-start → … → aws-destroy` | `gcp-start → deploy-gcp → … → gcp-destroy` | GCP primero, AWS después, teardown inverso |
+
+**Regla operativa (aplica a los modos 2-4):** la sesión de nube se enciende
+para trabajar y **se destruye al terminar**; el teardown y la verificación de
+coste son parte del DoD. El ciclo diario de desarrollo es el modo local ($0).
+
+---
+
+## Modo 1 — Local (docker compose)
+
+### Prerrequisitos / toolchain
+
+- **Docker + Docker Compose v2** (`docker compose version`).
+- Para los targets `make` de verificación y el benchmark: `make` (o los
+  comandos crudos equivalentes, que están en el propio [Makefile](Makefile),
+  legible) y **Python 3.12** con `pip install -r service-a/requirements.txt`
+  (los scripts leídos por los targets solo usan stdlib + lo que traen los
+  servicios).
+- PowerShell (el repo se opera en Windows; los equivalentes bash son triviales).
+
+### Credenciales y variables de entorno
+
+**Ninguna.** El stack local no necesita credenciales: las contraseñas de
+Postgres son locales de desarrollo (`postgres:postgres`, fijadas en
+[docker-compose.yml](docker-compose.yml)) y los exporters apuntan al collector
+en la red del compose. `.env` no se usa en este modo; las variables de
+`service-a`/`service-b` viajan inline en el compose.
+
+### Comandos (deploy)
 
 ```powershell
-# levanta los 7 servicios (postgres, collector, jaeger, prometheus, grafana, service-a, service-b)
+# stack completo: postgres, collector, jaeger, prometheus, grafana, service-a, service-b
 docker compose up --build -d
-
-# comprueba el estado
 docker compose ps
+
+# arranque por capas (núcleo primero, observabilidad después)
+docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.observability.yml up -d
 ```
 
-El esquema de base de datos **se inicializa solo** con un volumen nuevo:
+El esquema de BD **se inicializa solo** con un volumen nuevo:
 `init-scripts/01-orders-schema.sql` crea `orders`/`order_items` (DB `orders`) y
-`init-scripts/02-inventory-db.sql` crea y siembra la DB `inventory`.
+`init-scripts/02-inventory-db.sql` crea y siembra la DB `inventory` (SKUs
+`LAPTOP-001`, `MOUSE-001`, `KEYBOARD-001`).
 
-### Smoke test
+### Verificación / evidencia
 
 ```powershell
-# 1) crear una orden (200)
+# 1) smoke: crear una orden (200)
 Invoke-RestMethod -Method Post -Uri http://localhost:8000/orders `
   -ContentType 'application/json' `
   -Body '{"items":[{"sku":"LAPTOP-001","quantity":1,"unit_price":2500000}]}'
@@ -38,111 +99,33 @@ curl.exe -s http://localhost:8889/metrics | Select-String http_server
 # 3) log JSON con trace_id
 docker compose logs service-a | Select-String trace_id
 
-# 4) UIs
-#   Jaeger     http://localhost:16686
-#   Prometheus http://localhost:9090
-#   Grafana    http://localhost:3000   (admin/admin; datasources y dashboards provisionados por código)
+# 4) correlacion cross-signal (aserciones A1-A2; el resto se SKIP por no ir
+#    activas las banderas de nube — no rompen el target). El default del
+#    Makefile (8080) es el port-forward de GKE; en compose service-a escucha
+#    en 8000:
+make verify-correlation VERIFY_ENDPOINT=http://localhost:8000
+
+# 5) UIs: Jaeger http://localhost:16686 · Prometheus http://localhost:9090
+#          Grafana http://localhost:3000 (admin/admin)
 ```
 
-### Parar
+Evidencia de la verificación local de dashboards:
+[`docs/evidence/05-dashboards-local.md`](docs/evidence/05-dashboards-local.md);
+salida tipo de la correlación: [`docs/evidence/03-correlation.json`](docs/evidence/03-correlation.json).
+
+### Coste y teardown
+
+**$0** — no hay recursos de nube. Teardown:
 
 ```powershell
 docker compose down          # conserva el volumen postgres_data
-docker compose down -v       # borra el volumen (reinicia el esquema desde init-scripts)
+docker compose down -v       # borra el volumen (el seed se rehace al subir)
 ```
 
-## Arranque por capas (PLAN 1.A)
+### Ejecución sin Docker (desarrollo)
 
 ```powershell
-# núcleo: postgres + collector + service-a + service-b
-docker compose -f deploy/docker-compose.yml up -d
-# observabilidad: jaeger + prometheus + grafana
-docker compose -f deploy/docker-compose.observability.yml up -d
-```
-
-Ambos ficheros viven en `deploy/`, comparten proyecto y red por defecto, y se
-resuelven por nombre de servicio (`otel-collector:4317`, `prometheus:9090`,
-`jaeger:16686`).
-
-## Dashboards SLO (provisioning por codigo, nunca a mano)
-
-Tres artefactos versionados en `dashboards/`, uno por backend:
-
-| Archivo | Backend | Contenido |
-|---|---|---|
-| `grafana-slo.json` | Grafana OSS local (uid `otel-lab-slo`) | los 6 paneles de PLAN 3.C leidos TODOS de Prometheus con los nombres REALES del scrape (`otel_http_server_duration_milliseconds_*`, `exported_job`, hostmetrics, autotelemetria del collector); variables `service`/`env` y data links de exemplar a Tempo (cloud) y Jaeger (local) |
-| `cloudwatch-slo.json` | CloudWatch (AWS, nativo) | maximo 3 widgets sobre los unicos contadores que existen alli (EMF `OtelLab`); sin CPUUtilization porque el cloudwatch-agent del task murio exit 1 y ContainerInsights es de pago — sustituido por salud de dependencia, documentado en el `comment` del JSON |
-| `cloud-monitoring-gcp.json` | Cloud Monitoring (GCP, nativo) | los 6 equivalentes GCP (Managed Prometheus/contadores), provisionado por su IaC |
-
-**Local**: al levantar el stack, el provider de Grafana
-(`deploy/grafana/provisioning/dashboards/dashboards.yml`, path
-`/var/lib/grafana/dashboards` montado desde `dashboards/`) aplica el JSON en
-calor. No hay importacion manual. Verificacion en vivo y las queries
-reales: `docs/evidence/05-dashboards-local.md`.
-
-```powershell
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observability.yml up -d
-# 30 s despues, el tablero ya esta servido:
-curl -u admin:admin http://localhost:3000/api/dashboards/uid/otel-lab-slo
-```
-
-**AWS (mini-sesion, coste ~$0 — dashboard y alarmas no facturan computo)**:
-
-```bash
-make aws-dashboard   # aws cloudwatch put-dashboard --dashboard-name otel-lab-slo (idempotente)
-make aws-alarms      # 2 put-metric-alarm desde dashboards/cloudwatch-alarms.json (idempotente)
-```
-
-Las alarmas (`otel-lab-error-ratio`: ratio EMF failed/created > 5 %;
-`otel-lab-db-degradation`: errores de DB > 5/5 min como aproximacion de la
-p99 con las metricas EMF disponibles) quedan SIN acciones SNS: la notificacion
-es deuda del guardrail de coste del proximo ciclo. Grafana NUNCA consulta CloudWatch
-(GetMetricData se cobra siempre, R-05): el dashboard de 6 paneles vive en
-Prometheus y el de CloudWatch es el complemento nativo de 3 widgets.
-
-## Benchmark de overhead (Fase 4, PLAN §4)
-
-La campana ABBA corre contra el stack LOCAL (compose) con k6 en Docker y
-Prometheus local como instrumento; jaeger/grafana permanecen apagados. El
-coste por nube se lee del ingest REAL de logs de la variante B (trazas OFF
-por §3.4 C2), sin sesion de computo en ninguna nube.
-
-```powershell
-# campana completa A/B (6 runs x ~7 min) + atribucion (2 runs):
-powershell -File scripts/benchmark.ps1 -Mode full -CloudLogs
-powershell -File scripts/benchmark.ps1 -Mode attrib -CloudLogs
-# smoke corto y probes de ingesta cloud:
-powershell -File scripts/benchmark.ps1 -Mode quick
-powershell -File scripts/benchmark.ps1 -Mode cloudprobe
-# agregacion -> k6/baseline.json, k6/otel.json y tabla de docs/evidence/04-overhead.md:
-python scripts/bench_report.py
-```
-
-- Variante A = `OTEL_ENABLED=false`; B = `true` con
-  `OTEL_TRACES_SAMPLER=parentbased_traceidratio`, arg 0.25 (1.0 / 0.0 para la
-  atribucion) y el pipeline de trazas del collector en sink `nop`
-  (`deploy/collector/otel-collector-bench.yaml`).
-- Artefactos crudos por run en `bench/` (windows.json, k6/, metrics/, cost/);
-  logs en `bench/logs/` (gitignored). El orquestador hace teardown completo al
-  terminar o fallar.
-- Limitaciones declaradas (perfil local vs Fargate/e2-small, k6 compartiendo
-  host, metodologia de coste por ventana): `docs/evidence/04-overhead.md`.
-
-## Imágenes (tags fijados, sin `:latest`)
-
-| Servicio | Imagen |
-|---|---|
-| postgres | `postgres:16-alpine` |
-| otel-collector | `otel/opentelemetry-collector-contrib:0.162.0` |
-| jaeger | `jaegertracing/all-in-one:1.76.0` |
-| prometheus | `prom/prometheus:v2.53.0` |
-| grafana | `grafana/grafana:11.1.0` |
-| k6 (benchmark) | `grafana/k6:2.0.0` |
-
-## Ejecución sin Docker (desarrollo)
-
-```powershell
-pip install -r requirements.txt
+pip install -r service-a/requirements.txt
 uvicorn app.main:app --app-dir service-a --host 0.0.0.0 --port 8000
 uvicorn app.main:app --app-dir service-b --host 0.0.0.0 --port 8001
 ```
@@ -150,121 +133,158 @@ uvicorn app.main:app --app-dir service-b --host 0.0.0.0 --port 8001
 Docs de API: <http://localhost:8000/docs>. Métricas de proceso:
 <http://localhost:8000/metrics> y <http://localhost:8001/metrics>.
 
-## Despliegue en AWS (ECS Fargate)
+---
 
-La misma aplicación sobre **ECS Fargate** con el **Collector ADOT**: las 4
-señales van a X-Ray (trazas), CloudWatch Logs (logs), CloudWatch EMF
-(métricas) y un **CloudWatch Agent** sidecar (métricas de infraestructura ECS).
-Igual que en GKE: sin ALB. El acceso NO es por túnel SSM — SSM no soporta
-port-forwarding a tasks Fargate (verificado en vivo 2026-10-12; ver
-`docs/aws-ecs.md` §5): es una **regla ingress temporal /32** para la IP del
-operador, con `make aws-access-grant` / `aws-access-revoke`.
+## Modo 2 — AWS (ECS Fargate)
 
-### Requisitos
+La misma aplicación sobre **una única task Fargate** (`awsvpc`) con 5
+contenedores: `service-a` → `service-b` → `postgres` + el **Collector ADOT** +
+el sidecar `cloudwatch-agent`. Las 4 señales van a X-Ray (trazas), CloudWatch
+Logs (logs), CloudWatch EMF (métricas) y métricas de infraestructura ECS.
+**Sin ALB**: el acceso es una regla ingress **temporal /32** a la IP pública del
+ENI de la task (SSM **no** soporta port-forwarding a Fargate — desviación
+verificada en vivo y documentada en [docs/aws-ecs.md](docs/aws-ecs.md) §5).
 
-- `aws` CLI con perfil `otel-lab` (credenciales en `~/.aws/`, nunca en el repo),
-  `docker` y `make`. Opcional para shell dentro de la task: `aws ecs
-  execute-command` necesita el `session-manager-plugin` en el `PATH` (ECS Exec
-  solo da shell, no reenvío de puertos).
-- Creados **una sola vez por el humano** (este lab no tiene IAM de autómata):
-  - Repos **ECR** `otel-lab/service-a`, `otel-lab/service-b`,
-    `otel-lab/otel-collector` y `otel-lab/postgres` (tag INMUTABLE, mismo
-    patrón; el de postgres alimenta `deploy/aws/postgres.Dockerfile`).
-  - Roles **`otel-lab-exec-ecs`** (execution: ECR pull + logs) y
-    **`otel-lab-task-ecs`** (task: X-Ray, CloudWatch y acceso SSM).
-  - Parámetro **SSM** `/otel-lab/cloudwatch-agent/config` (config JSON del
-    CloudWatch agent) y bucket S3 para el state (`scripts/guard_cost.py`).
-  - Parámetros **SSM** de la DB: `/otel-lab/postgres/password`,
-    `/otel-lab/database-url/service-a` =
-    `postgresql://postgres:<pw>@localhost:5432/orders` y
-    `/otel-lab/database-url/service-b` =
-    `postgresql://postgres:<pw>@localhost:5432/inventory` (service-b usa la DB
-    `inventory` que crea `init-scripts/01-init.sh`).
-- Imagen pública fijada del collector ADOT:
-  `public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0` (tag fijo).
+### Prerrequisitos / toolchain
 
-### Ciclo de vida
+- `aws` CLI v2 con un **perfil de despliegue** (nunca root), `docker`, `make`,
+  `pwsh` (los targets `aws-access-*`, `aws-alarms`, `cost-guard`,
+  `budget-*` invocan scripts PowerShell).
+- Opcional para shell dentro de la task (`aws ecs execute-command`):
+  `session-manager-plugin` en el `PATH` (ECS Exec solo da shell, no reenvío de
+  puertos).
+- Para la verificación con boto3 (`--include-aws`): `pip install boto3` en el
+  Python que lanza `scripts/verify_correlation.py`.
+
+### Credenciales y variables de entorno
+
+- **Credenciales AWS**: solo en `~/.aws/` (perfil `otel-lab`). Nunca en el repo
+  ni en `.env`. El perfil lo fija `AWS_PROFILE` (default del Makefile:
+  `otel-lab`).
+- **SSM Parameter Store** — la task los resuelve todos vía `valueFrom` por ARN;
+  **si falta uno, la task no arranca**. Creados **una sola vez por el humano**
+  (Fase 0; el valor nunca se copia a este README — se referencia por nombre).
+  Lista canónica con el shape de cada valor:
+  [`deploy/aws/README.md`](deploy/aws/README.md) (tabla SSM). Son **10**:
+  - `/otel-lab/postgres/password` (SecureString — `POSTGRES_PASSWORD`)
+  - `/otel-lab/database-url/service-a` = `postgresql://postgres:<pw>@localhost:5432/orders`
+  - `/otel-lab/database-url/service-b` = `postgresql://postgres:<pw>@localhost:5432/inventory`
+  - `/otel-lab/grafana/prom-url` y `/otel-lab/grafana/prom-auth` (exporter
+    `prometheusremotewrite` del collector ADOT)
+  - `/otel-lab/grafana/tempo-endpoint` y `/otel-lab/grafana/tempo-auth`
+    (`otlphttp/tempo`)
+  - `/otel-lab/grafana/loki-endpoint` y `/otel-lab/grafana/loki-auth`
+    (`otlphttp/loki`)
+  - `/otel-lab/cloudwatch-agent/config` (JSON del agente — `CW_CONFIG_CONTENT`)
+- **Recursos permanentes creados una sola vez**: repos ECR
+  `otel-lab/{service-a,service-b,otel-collector,postgres}` (tag immutable),
+  roles `otel-lab-exec-ecs` (ECR pull + logs + lectura SSM) y
+  `otel-lab-task-ecs` (X-Ray + CloudWatch + SSM/EC2 read) con las políticas de
+  [`deploy/aws/iam/`](deploy/aws/iam), y el bucket S3 del state de Terraform.
+- Las variables de build/run que consumen los targets (`AWS_REGION`,
+  `AWS_ACCOUNT_ID`, `AWS_PROFILE`, `IMAGE_TAG`, `ECS_*`, `TASK_ROLE`,
+  `EXEC_ROLE`, `NET_NAME`, `VPC_CIDR`, `SUBNET_CIDR`, `INVENTORY_URL`) tienen
+  default en el [Makefile](Makefile) y plantilla en [.env.example](.env.example)
+  — **sin secretos embebidos**.
+
+### Comandos y pasos de despliegue
 
 | # | Comando | Qué hace |
 |---|---|---|
-| 1 | `make validate-collector` | valida offline el YAML ADOT del modo AWS (arranca el binario localmente, sin coste) |
-| 2 | `make aws-push` | login ECR + build/push de `service-a`, `service-b`, el **collector ADOT** con el YAML AWS horneado y **postgres con el seed horneado** (tag `$(IMAGE_TAG)`, nunca `:latest`) |
-| 3 | `make aws-start` | red (VPC + subnet pública + IGW, sin NAT) + cluster + task definition (render del template) + service FARGATE `desired_count=1` con `assignPublicIp` efímero y ECS Exec |
-| 4 | `make aws-access-grant` | regla ingress **temporal TCP /32** (IP pública del operador, autodetectada) para 8000/8889 en el SG; imprime la IP pública del ENI de la task |
-| 4b | `make aws-verify` | corre `verify_correlation.py --include-aws` contra la IP pública del ENI de la task (`:8000` + `--prometheus-url :8889/metrics`) |
-| 4c | `make aws-access-revoke` | revoca la regla temporal; el SG vuelve a **0 ingress** (steady-state) |
-| 5 | `make aws-stop` | `desired_count=0`: la task Fargate deja de facturar (idempotente) |
-| 6 | `make aws-destroy` | botón nuclear: borra service + cluster y **verifica** que no queda nada activo |
-| 7 | `make aws-net-destroy` | borra la red tagueada (VPC, subnet, IGW, route table, SG) y comprueba que no quedan dependencias |
+| 1 | `make validate-collector` | valida offline el YAML ADOT (arranca el binario local, sin coste; ADOT no tiene subcomando `validate`) |
+| 2 | `make aws-push` | login ECR + build/push de las 4 imágenes (collector con el YAML horneado; postgres con `init-scripts/` horneado vía [`deploy/aws/postgres.Dockerfile`](deploy/aws/postgres.Dockerfile); tag `$(IMAGE_TAG)`, nunca `:latest`) |
+| 3 | `make aws-start` | red (VPC + subnet pública + IGW, sin NAT) + cluster + render/registro de la [task definition](deploy/aws/task-definition.json) + service FARGATE `desired_count=1` con `assignPublicIp` efímero y ECS Exec |
+| 4 | `make aws-access-grant` | regla ingress **temporal TCP /32** a la IP pública del operador (autodetectada) para 8000/8889; revela la IP pública del ENI de la task |
+| 5 | `make aws-verify` | corre `verify_correlation.py --include-aws` contra esa IP (`:8000` + `--prometheus-url :8889/metrics`) |
+| 6 | `make aws-access-revoke` | revoca la regla temporal; el SG vuelve a **0 ingress** (steady-state) |
+| 7 | `make aws-stop` | `desired_count=0`: la task deja de facturar (idempotente, no borra nada) |
+| 8 | `make aws-destroy` | botón nuclear: borra service + cluster y **verifica** que no queda nada activo |
+| 9 | `make aws-net-destroy` | borra la red tagueada (VPC, subnet, IGW, route table, SG) |
 
-Como no hay ALB, el "backend" equivalente de cada servicio es la **IP pública
-del ENI de la task** (visible tras `make aws-access-grant`; `ecs describe-tasks`
-no la lista: sale en `ec2 describe-network-interfaces →
-Association.PublicIp`), comparando con la tabla de backends de GKE:
-
-| Ruta en la consola de AWS | Backend (CLI) |
-|---|---|
-| CloudWatch Logs → ECS | `aws logs tail /otel/labs/ecs-platform/<contenedor>` (grupos `service-a`, `service-b`, `postgres`, `otel-collector`, `cloudwatch-agent`) |
-| X-Ray → Traces | trazas `service-a`/`service-b` correlacionadas por `trace_id` |
-| CloudWatch → Métricas (EMF + agent) | dashboard **OTel Lab — AWS ECS** creado en la Fase 5 |
-| ECS Exec → consola del contenedor | `aws ecs execute-command --cluster otel-lab --task <taskId> --container service-a --command "/bin/sh" --interactive` (solo shell; el reenvío de puertos por SSM **no existe** en Fargate, §`docs/aws-ecs.md`) |
-
-### Smoke en AWS
+Smoke manual (equivalente a `aws-verify`):
 
 ```powershell
-make aws-access-grant   # abre /32 del operador + imprime la IP publica de la task
-
-# en otra terminal — el mismo smoke que local/GKE (sustituye <IP_TASK>):
+make aws-access-grant   # imprime <IP_TASK> publica del ENI
 Invoke-RestMethod -Method Post -Uri http://<IP_TASK>:8000/orders `
   -ContentType 'application/json' `
   -Body '{"items":[{"sku":"LAPTOP-001","quantity":1,"unit_price":2500000}]}'
+make aws-access-revoke  # teardown del acceso al terminar
+```
 
-make aws-access-revoke  # teardown del acceso al terminar la sesion
+IaC complementaria (no crea la sesión de cómputo — el cómputo lo gobierna el
+Makefile): `make tf-validate-aws` y `make tf-plan-aws` (plan + gate de lista
+negra con [`scripts/guard_cost.py`](scripts/guard_cost.py)); el flujo con state
+real y los comandos de bootstrap están en [infra/README.md](infra/README.md).
 
-`200` = orden creada. Dónde ver las señales:
+### Verificación / evidencia
 
-| Señal | Dónde |
-|---|---|
-| Trazas | **X-Ray** → consola (buscar el `trace_id` del log de la orden) |
-| Logs | **CloudWatch Logs** → grupos `/otel/labs/ecs-platform/*` |
-| Métricas | **CloudWatch** → el agente emite métricas ECS (`CpuUtilized`, `MemoryUtilized`…) con EMF del collector |
+- **Dónde mirar las señales**: X-Ray → trazas `service-a`/`service-b`
+  correlacionadas por `trace_id`; CloudWatch Logs → grupos
+  `/otel/labs/ecs-platform/*` (`service-a`, `service-b`, `postgres`,
+  `otel-collector`, `cloudwatch-agent`); CloudWatch → métricas EMF del namespace
+  `OtelLab` + dashboard `make aws-dashboard` y alarmas `make aws-alarms`.
+- **Qué verifica el framework**: `make aws-verify` (o la corrida manual de
+  `verify_correlation.py --include-aws`) evalúa A1-A9; A8 (exemplars) exige
+  apuntar el scrape a la app: `--prometheus-url http://<IP_TASK>:8000/metrics`
+  (el exporter del collector en `:8889` no propaga exemplars,
+  [docs/aws-ecs.md](docs/aws-ecs.md) §7).
+- Evidencia en vivo: [`docs/evidence/02-aws-ecs-session.md`](docs/evidence/02-aws-ecs-session.md),
+  [`docs/evidence/03-correlation-aws.json`](docs/evidence/03-correlation-aws.json),
+  línea base de coste [`docs/evidence/00-aws-baseline.md`](docs/evidence/00-aws-baseline.md).
 
-### Coste y teardown
+### Coste estimado
 
-Fargate factura por segundo mientras `desired_count=1`. **`make aws-stop`** lo
-apaga sin borrar nada (vuelve a encenderse con `aws-start`, la red y la task
-definition persisten). El botón nuclear es **`make aws-destroy`** + opcional
-`make aws-net-destroy`. `scripts/guard_cost.py` vigila el coste acumulado del
-proyecto (presupuesto $100 de AWS, PLAN §3.5) con el state en S3.
+Task Fargate **1 vCPU / 2 GB** (los `cpu: "1024"` / `memory: "2048"` de
+[`deploy/aws/task-definition.json`](deploy/aws/task-definition.json)) ≈
+**$0.049/h** mientras `desired_count=1`; fuera de sesión ≈ $0. Presupuesto AWS: **$100 de créditos** con umbral diario $1
+(`aws_budget` en IaC) y gate de **150 h de task** (`make budget-hours`,
+[`docs/evidence/instance-hours.csv`](docs/evidence/instance-hours.csv)). El
+modelo completo, por concepto, en [COST.md](COST.md) §1.
 
-## Despliegue en GCP (GKE)
+### Teardown (obligatorio)
 
-Modo nube del mismo pipeline sobre **GKE Standard** (node pool spot):
-`service-a` → `service-b` → PostgreSQL con el Collector OTel exportando a
-Cloud Trace, Cloud Logging y Cloud Monitoring (Managed Prometheus). El ciclo
-de vida lo gobierna el `Makefile` de esta carpeta; solo cambian el cómputo y
-el YAML del collector — la aplicación es idéntica al modo local.
+`make aws-stop` (pausa sin borrar) → `make aws-destroy` (nuclear + verificación)
+→ `make aws-net-destroy` (red). Higiene: retención de logs 3 días, ECR
+keep-last-5. Nunca dejar `desired_count=1` fuera de sesión.
 
-### Requisitos
+---
 
-- `gcloud` con ADC con acceso a tu proyecto (`gcloud auth login` y
-  `gcloud config set project <proyecto>`), `docker`, `kubectl` y `helm`.
+## Modo 3 — GCP (GKE Standard)
+
+Modo nube del mismo pipeline sobre **GKE Standard** (cluster zonal
+`us-central1-a`, node pool **spot** con autoscaling 0–3): `service-a` →
+`service-b` → PostgreSQL con el Collector OTel exportando a Cloud Trace, Cloud
+Logging y Cloud Monitoring (Managed Prometheus). El ciclo de vida lo gobierna el
+[Makefile](Makefile); solo cambian el cómputo y el YAML del collector.
+
+### Prerrequisitos / toolchain
+
+- `gcloud` con ADC con acceso a tu proyecto (`gcloud auth login` +
+  `gcloud config set project <proyecto>`), `docker`, `kubectl`, `helm`, `make`.
 - API de GKE habilitada: `gcloud services enable container.googleapis.com`.
-- En el proyecto, creados una sola vez:
-  - Repositorio **Artifact Registry** `otel-lab` (docker) en `us-central1`.
-  - Secreto **Secret Manager** `pg-password` con la contraseña de PostgreSQL.
-- `make` en el PATH. En Windows sin `make`, los comandos crudos equivalentes
-  están en el propio `Makefile`, que es legible.
+- Para la verificación (`--include-gcp`): ADC operativa —
+  `gcloud auth application-default login` (el script habla con las APIs vía
+  ADC + urllib; **no** requiere instalar ningún SDK de Google en Python).
 
-El `Makefile` y el chart fijan por defecto el proyecto `otel-lab-obs-2610`;
-para usar otro, pasa `GCP_PROJECT_ID=<proyecto>` a los targets `make` y
-ajusta los `image.repository` de `service-a`/`service-b` en
-`helm/otel-lab/values.yaml` (o por `--set` en el deploy).
+### Credenciales y variables de entorno
+
+- **ADC de `gcloud`** para el operador; en el cluster los pods **no llevan
+  claves**: el collector se suplantó con el SA de GCP vía **Workload Identity**
+  (binding incluido en `make gcp-start`), y la contraseña de Postgres se monta
+  desde **Secret Manager** con el add-on CSI.
+- **Secret Manager** (creado una sola vez, Fase 0): secreto **`pg-password`** —
+  el chart lo referencia por nombre, el valor nunca va al repo ni a values.
+- Variables de los targets (`GCP_PROJECT_ID`, `GCP_REGION`, `GCP_ZONE`,
+  `GCP_CLUSTER`, `GCP_NAMESPACE`, `COLLECTOR_K8S_SA`, `COLLECTOR_GCP_SA`,
+  `OTEL_TRACES_EXPORTER`) con default en el Makefile (proyecto
+  `otel-lab-obs-2610`); override sin editar: `make deploy-gcp
+  OTEL_TRACES_EXPORTER=nop`.
 
 ### Build & push de imágenes (Artifact Registry)
 
-Las imágenes de app viven en AR; el Collector y postgres usan imágenes
-públicas fijadas por el chart. Desde esta carpeta:
+Las imágenes de app viven en AR; collector, postgres y jaeger usan imágenes
+públicas fijadas por el chart. Creados una sola vez: repositorio **Artifact
+Registry** `otel-lab` (docker) en `us-central1`. Desde esta carpeta:
 
 ```powershell
 gcloud auth configure-docker us-central1-docker.pkg.dev
@@ -275,37 +295,28 @@ docker push us-central1-docker.pkg.dev/otel-lab-obs-2610/otel-lab/service-a:0.1.
 docker push us-central1-docker.pkg.dev/otel-lab-obs-2610/otel-lab/service-b:0.1.0
 ```
 
-El tag `0.1.0` es el que fija `values.yaml` (sin `:latest`).
+El tag `0.1.0` es el que fija
+[`helm/otel-lab/values.yaml`](helm/otel-lab/values.yaml) (sin `:latest`).
 
-### Ciclo de vida
+### Comandos y pasos de despliegue
 
 | # | Comando | Qué hace |
 |---|---|---|
-| 1 | `make gcp-start` | VPC + subnet (private Google Access), clúster zonal `otel-lab-std` (`us-central1-a`), nodo spot `e2-medium` con autoscaling 0–3 y **add-on Secret Manager CSI en el create** (`--enable-secret-manager`), Workload Identity y **binding del SA del collector incluido**, kubeconfig |
-| 2 | `make deploy-gcp` | sincroniza la config del collector y el seed al chart, `helm upgrade --install` y espera el rollout |
-| 3 | `make port-gcp` | port-forward autenticado, sin ingress público: `svc/service-a 8080:8080` + collector `4317`/`8889` |
-| 4 | `make gcp-destroy` | borra el clúster y verifica que ya no aparece en la lista |
+| 1 | `make gcp-start` | VPC + subnet (Private Google Access, sin NAT) + clúster zonal `otel-lab-std` (regular channel, nodo spot `e2-medium` autoscaling 0–3, **add-on Secret Manager CSI en el create** `--enable-secret-manager`), binding Workload Identity del SA del collector, kubeconfig |
+| 2 | `make deploy-gcp` | sincroniza la config del collector ([`deploy/collector/otel-collector-gcp.yaml`](deploy/collector/otel-collector-gcp.yaml)) y el seed al chart, `helm upgrade --install` y espera el rollout |
+| 3 | `make port-gcp` | port-forward autenticado **sin ingress público**: `svc/service-a 8080:8080` + collector `4317`/`8889` |
+| 4 | `make port-jaeger-gcp` | Jaeger UI dentro del cluster (`svc/jaeger-ui-on-gcp 16686`), waterfall `service-a→service-b→DB` |
+| (5) | `make gcp-expose` | **solo para el modo dual**: habilita el Service type LoadBalancer regional de `service-b` (default OFF) |
+| 6 | `make gcp-stop` | escala el pool a 0 (deja de correr el nodo; el fee de plano sigue) |
+| 7 | `make gcp-destroy` | botón nuclear: borra el clúster y **verifica** que no aparece en la lista |
 
-### Prerrequisitos del clúster
+Prerrequisitos del clúster: el add-on CSI va **en el create** (sin el driver los
+pods quedan `ContainerCreating`); sobre un clúster existente, `gcloud container
+clusters update otel-lab-std --location=us-central1-a --enable-secret-manager`
+tarda ~40 min (`UPGRADE_NODES`). El binding Workload Identity ya viene incluido
+en `gcp-start` — no hay que repetir nada.
 
-1. **Add-on CSI Secret Manager.** El chart monta `pg-password` con el driver
-   `secrets-store-gke.csi.k8s.io` (add-on de GKE). **`make gcp-start` ya lo
-   crea con el clúster** (`--enable-secret-manager`, rondando desde la ronda 2
-   de la sesión viva 2026-10-12: sin el driver los pods quedan en
-   `ContainerCreating`). Si reutilizas un clúster existente sin el add-on,
-   aplícalo antes de `helm`:
-
-   ```powershell
-   gcloud container clusters update otel-lab-std --location=us-central1-a --enable-secret-manager
-   ```
-
-   Sobre cluster vivo esto tarda (~40 min, hace `UPGRADE_NODES`) — por eso va
-   en el create.
-2. **Workload Identity collector→SA.** Ya viene en `make gcp-start`
-   (binding del KSA `otel-lab-collector` con el SA de GCP); no hay que
-   repetir nada.
-
-### Smoke en GKE
+### Verificación / evidencia
 
 ```powershell
 kubectl -n otel-lab port-forward svc/service-a 18080:8080
@@ -314,103 +325,283 @@ kubectl -n otel-lab port-forward svc/service-a 18080:8080
 Invoke-RestMethod -Method Post -Uri http://localhost:18080/orders `
   -ContentType 'application/json' `
   -Body '{"items":[{"sku":"LAPTOP-001","quantity":1,"unit_price":2500000}]}'
+
+# aserciones A10-A12 (Cloud Trace/Logging/Monitoring) via ADC:
+python scripts/verify_correlation.py --endpoint http://localhost:18080 --include-gcp
+# (equivale a: make verify-correlation-gcp con VERIFY_ENDPOINT apuntando al port-forward)
 ```
 
-`200` = orden creada (repetir el mismo SKU puede dar `409`: stock ya
-reservado; el seed se rehace al reiniciar postgres). Dónde ver las 3 señales:
+`200` = orden creada (repetir el mismo SKU puede dar `409`: stock ya reservado;
+el seed se rehace al reiniciar postgres). Dónde ver las 3 señales:
 
 | Señal | Dónde |
 |---|---|
 | Trazas | **Cloud Trace** → busca el `trace_id` que sale en el log de la orden |
 | Logs | **Cloud Logging** → logs de `service-a`, campo `jsonPayload.trace_id` |
-| Métricas | **Cloud Monitoring** → dashboard **OTel Lab — SLIs GCP (Managed Prometheus)** (6 paneles; se crea una vez con `gcloud monitoring dashboards create --config-from-file dashboards/cloud-monitoring-gcp.json`) |
+| Métricas | **Cloud Monitoring** → dashboard **OTel Lab — SLIs GCP (Managed Prometheus)** (6 paneles; provisionado por su IaC — `google_monitoring_dashboard` en [`infra/gcp/dashboard.tf`](infra/gcp/dashboard.tf), que aplica el JSON tal cual). Si prefieres la CLI: `gcloud monitoring dashboards create` exige el envoltorio `dashboard:` alrededor del JSON, que el artefacto versionado NO lleva — usa la vía IaC |
 
-### Coste y teardown
+Evidencia en vivo: [`docs/evidence/02-validation-dashboard-gcp.md`](docs/evidence/02-validation-dashboard-gcp.md),
+[`docs/evidence/03-correlation-gcp.json`](docs/evidence/03-correlation-gcp.json),
+[`docs/evidence/04-jaeger-gcp.md`](docs/evidence/04-jaeger-gcp.md), binding WI
+[`docs/evidence/01-wi-binding-gcp.md`](docs/evidence/01-wi-binding-gcp.md),
+línea base free-tier [`docs/evidence/00-free-tier-baseline-gcp.md`](docs/evidence/00-free-tier-baseline-gcp.md).
 
-GKE Standard cobra una **fee de gestión por hora** mientras el clúster
-existe, además del nodo. Levanta el clúster solo para trabajar y
-**destrúyelo al terminar** (`make gcp-destroy`); `make gcp-stop` escala el
-nodo a 0, pero la fee del clúster sigue corriendo.
+### Coste estimado
 
-### Nota de perfil (CPU con GKE ≥ 1.36)
+Fee de plano GKE Standard **$0.10/h** (corre desde el create hasta el delete,
+aunque el pool esté a 0) + nodo spot e2-medium (~$0.012/h por nodo medido en
+sesión; autoscaler baja a 0 en idle — el `~$0.04/h` del comentario del Makefile
+es el peor caso de 3 nodos en total). Presupuesto GCP: **$300 de créditos** con
+ventana de 90 días
+y alertas de budget al 50/80/90/100/150 %. Modelo completo en
+[COST.md](COST.md) §1; horas reales de sesión en
+[`docs/evidence/cluster-hours.csv`](docs/evidence/cluster-hours.csv).
 
-`make gcp-start` crea el pool en **`e2-medium` spot con autoscaling 0–3**: el
-perfil original `e2-small` (0.5 CPU compartida) no cabe — los system pods de
-GKE 1.36 consumen ~856m de CPU, el add-on CSI pide su propio espacio y los pods
-de la app se quedan `Pending` con `Insufficient cpu` (observado en vivo;
-decisión registrada también en `COST.md` y en el Terraform, que ya usaba
-`e2-medium`). El autoscaler sube hasta 3 nodos spot si el add-on + workloads
-no caben en uno y vuelve a 0 en idle; el fee de mgmt ($0.10/h) no depende del
-perfil. Alternativa si quieres apurar un perfil menor: bajar los requests a 20m
-en los 4 componentes, sustituyendo el `make deploy-gcp` por su `helm`
-equivalente:
+> **Nota de perfil (GKE ≥ 1.36):** el pool es `e2-medium` (no `e2-small`): los
+> system pods consumen ~856m y el add-on CSI pide su propio espacio — con
+> `e2-small` los pods quedan `Pending` con `Insufficient cpu` (observado en
+> vivo). El chart **ya fija requests de 20m/pod por defecto** en los 5
+> componentes (limits de 1 CPU intactos, ver
+> [`helm/otel-lab/values.yaml`](helm/otel-lab/values.yaml)) — no hay que bajar
+> nada; el `helm upgrade --install` con `--set …requests.cpu=20m` solo sirve
+> como ejemplo si se quiere forzar el override desde otra base de values:
+>
+> ```powershell
+> helm upgrade --install otel-lab helm/otel-lab --namespace otel-lab `
+>   --set global.project=otel-lab-obs-2610 --set global.region=us-central1 `
+>   --set collector.env.OTEL_TRACES_EXPORTER=googlecloud `
+>   --set collector.resources.requests.cpu=20m --set serviceA.resources.requests.cpu=20m `
+>   --set serviceB.resources.requests.cpu=20m --set postgres.resources.requests.cpu=20m
+> ```
+
+### Teardown (obligatorio)
+
+`make gcp-destroy` (borra clúster + node pool + el LB si estaba activo, y
+verifica) → registrar la línea `delete` en `docs/evidence/cluster-hours.csv`.
+La infra permanente ($0 en reposo — VPC, AR, buckets, SA/IAM, secreto, budget)
+no se toca. `make gcp-stop` **no** detiene el fee de plano: solo para pausas
+dentro de la misma sesión de trabajo.
+
+---
+
+## Modo 4 — Dual-cloud (AWS + GCP simultáneo)
+
+El punto fuerte del proyecto: el `trace_id` W3C **cruza la frontera de nubes**
+cuando `service-a` corre en ECS (AWS) y llama al `service-b` de GKE expuesto
+por su LoadBalancer regional. La aserción **A13** exige ver el MISMO `trace_id`
+en una señal de AWS (X-Ray o CloudWatch Logs) **y** en una de GCP (Cloud Trace o
+Cloud Logging). Orden ejecutado en vivo el 2026-10-12 y verificado:
+
+### Prerrequisitos / toolchain
+
+La **unión** de los modos 2 y 3: `aws` CLI + perfil, `gcloud` + ADC, `docker`,
+`kubectl`, `helm`, `make`, `pwsh`, y `pip install boto3` (para `--include-aws`;
+`--include-gcp` solo necesita la ADC de `gcloud`).
+
+### Credenciales y variables de entorno
+
+Como en los modos 2 y 3 (perfiles `~/.aws/` + ADC; SSM SecureString y Secret
+Manager referenciados por nombre — sin secretos locales). Extra del modo dual:
+`INVENTORY_URL` apunta al LB de GKE:
 
 ```powershell
-helm upgrade --install otel-lab helm/otel-lab --namespace otel-lab `
-  --set global.project=otel-lab-obs-2610 --set global.region=us-central1 `
-  --set collector.env.OTEL_TRACES_EXPORTER=googlecloud `
-  --set collector.resources.requests.cpu=20m --set serviceA.resources.requests.cpu=20m `
-  --set serviceB.resources.requests.cpu=20m --set postgres.resources.requests.cpu=20m
+make aws-start INVENTORY_URL=http://<LB_IP>:8001
 ```
 
-## Sesión dual-cloud (correlación cruzada de nubes, aserción 13 de PLAN §3.A)
+### Pasos de despliegue (GCP primero — el LB debe existir antes de renderizar la task AWS)
 
-El `trace_id` W3C cruza la frontera AWS↔GCP cuando **service-a corre en ECS y
-llama al service-b de GKE** expuesto por su LoadBalancer regional. Orden
-completo de la sesión (el que se ejecutó en vivo el 2026-10-12; todo lo demás
-queda probado offline):
+1. **Lado GCP**:
 
-1. **GCP primero** (el LB debe existir antes de renderizar la task AWS):
    ```powershell
-   make gcp-start   # cluster zonal spot: pool e2-medium autoscaling 0-3 + add-on
-                    # CSI Secret Manager EN EL CREATE (fee $0.10/h desde el create)
-   # build/push de service-a/b a Artifact Registry (tabla de arriba)
-   make deploy-gcp                         # helm install (ClusterIP por defecto)
-   make gcp-expose                         # UNICO LB del lab: service-b-lb regional
+   make gcp-start      # fee $0.10/h corre desde el create
+   # build/push de service-a/b a AR (bloque del Modo 3)
+   make deploy-gcp     # helm install (ClusterIP por defecto)
+   make gcp-expose     # UNICO LB del lab: service-b-lb regional (default OFF)
    kubectl -n otel-lab get svc service-b-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
    ```
-   Prerequisito SSM (humano, Fase 0): `/otel-lab/database-url/service-a` =
-   `.../orders` y `/otel-lab/database-url/service-b` = `.../inventory` (sin este
-   segundo valor service-b da 500 — bug 3 de la ronda 2).
-2. **AWS mono** (pipeline completo en la task, cierra A1-A9):
+
+   Prerrequisito SSM (humano, Fase 0): `/otel-lab/database-url/service-a` =
+   `.../orders` **y** `/otel-lab/database-url/service-b` = `.../inventory` (sin
+   este segundo valor service-b da 500).
+
+2. **Lado AWS mono** (cierra A1-A9 en la task):
+
    ```powershell
-   make aws-push    # 4 imagenes, incluida otel-lab/postgres con seed horneado
-   make aws-start   # INVENTORY_URL default http://localhost:8001 (a+b en la task)
-   make aws-access-grant   # regla /32 temporal 8000+8889; imprime <IP_TASK> del ENI
-                           # (si el CLI no la imprime, resolver Association.PublicIp
-                           # con boto3 — ver docs/aws-ecs.md §2 nota camelCase)
-    python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
-      --include-aws --prometheus-url http://<IP_TASK>:8000/metrics
-    #   (A8 exige el scrape APP-LEVEL :8000 — los exemplars solo existen en la
-    #    exposicion OpenMetrics de la app; el exporter prom del collector :8889
-    #    no los propaga, ver docs/aws-ecs.md §7)
-    ```
-3. **Cruce dual** (cierra A13 con el MISMO trace en ambas nubes):
-   ```powershell
-   make aws-start INVENTORY_URL=http://<LB_IP>:8001   # update-service: service-a(ECS)->service-b(GKE)
-    python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
-      --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8000/metrics
+   make aws-push
+   make aws-start      # INVENTORY_URL default http://localhost:8001 (a+b en la task)
+   make aws-access-grant
+   python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
+     --include-aws --prometheus-url http://<IP_TASK>:8000/metrics
    ```
-   A13 exige ambas banderas: el MISMO `trace_id` inyectado debe aparecer en una
-   señal AWS (X-Ray por estructura — R-03 — o CloudWatch Logs del exportador
-   `/otel/labs/ecs-cluster/*`) **y** en una GCP (Cloud Trace o Cloud Logging).
-   En la corrida dual A3-A7/A10-A12 pueden degradar honestamente (service-b ya
-   no está en el path AWS); el cierre de fase es la **unión** de las corridas.
+
+3. **Cruce dual** (cierra A13 con el MISMO trace en ambas nubes):
+
+   ```powershell
+   make aws-start INVENTORY_URL=http://<LB_IP>:8001   # service-a(ECS) -> service-b(GKE)
+   python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
+     --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8000/metrics
+   # (el target `make verify-correlation-dual` activa ambas banderas pero NO pasa
+   #  --prometheus-url; para cerrar A8 en la corrida dual lanza el script a mano
+   #  como arriba, con --prometheus-url apuntando al scrape app-level de la task)
+   ```
+
 4. **Corrida GCP dedicada** (cierra A10-A12 contra el cluster interno):
+
    ```powershell
    kubectl -n otel-lab port-forward svc/service-a 18080:8080
    python scripts/verify_correlation.py --endpoint http://localhost:18080 --include-gcp
    ```
-5. **Revoke + teardown en orden inverso** (DoD §3.5): `make aws-access-revoke`
-   (el SG vuelve a 0 ingress) → `make aws-stop`/`aws-destroy` → `make gcp-destroy`
-   (el LB muere con el cluster). Coste de la sesión ≈ Fargate ($0.049/h) + fee
-   GKE ($0.10/h) + nodo spot e2-medium (~$0.012/h) + LB regional (regla de
-   reenvío sin cargo horario; se factura por datos procesados, <$0.01 en el
-   lab): una sesión de 2 h queda en ~$0.35 dentro de los créditos. **Ojo:** el
-   fee GKE corre desde el create hasta el delete — las pausas largas se pagan
-   (`gcp-stop` escala nodos a 0 pero NO detiene el fee del plano; ver
-   `docs/evidence/cluster-hours.csv`, sesión del 2026-10-12: 14.2 h ≈ $1.6).
 
-La evidencia final de la fase es la **unión** de las tres corridas (mono AWS,
-mono GCP, dual) documentada en `docs/evidence/03-correlation.md`, con sus JSONs
-(`03-correlation-aws.json`, `03-correlation-gcp.json`, `03-correlation-dual.json`).
+En la corrida dual A3-A7/A10-A12 pueden degradar honestamente (service-b ya no
+está en el path AWS); el cierre de fase es la **unión** de las corridas.
+
+### Verificación / evidencia
+
+- A13: mismo `trace_id` visible en X-Ray (por estructura — R-03) o CloudWatch
+  Logs del exportador **y** en Cloud Trace/Cloud Logging.
+- Evidencia final de la fase: [`docs/evidence/03-correlation.md`](docs/evidence/03-correlation.md)
+  con sus JSONs [`03-correlation-aws.json`](docs/evidence/03-correlation-aws.json),
+  [`03-correlation-gcp.json`](docs/evidence/03-correlation-gcp.json),
+  [`03-correlation-dual.json`](docs/evidence/03-correlation-dual.json).
+
+### Coste estimado
+
+Sesión de 2 h ≈ **$0.35**: Fargate $0.049/h + fee GKE $0.10/h + nodo spot
+e2-medium ~$0.012/h + LB regional (regla de reenvío sin cargo horario; se
+factura por datos procesados, <$0.01 en el lab). Dentro de los créditos ($100
+AWS / $300 GCP). El fee GKE corre desde el create hasta el delete: las pausas
+largas se pagan (sesión del 2026-10-12: 14.2 h ≈ $1.6,
+[`docs/evidence/cluster-hours.csv`](docs/evidence/cluster-hours.csv)).
+
+### Teardown (obligatorio, orden inverso)
+
+`make aws-access-revoke` (el SG vuelve a 0 ingress) → `make aws-stop` /
+`make aws-destroy` → `make gcp-destroy` (el LB muere con el clúster) → registrar
+las líneas de coste en los CSV de `docs/evidence/`. Verifica con
+`make cost-guard` que no quedan recursos facturando.
+
+---
+
+## Secciones comunes
+
+### Dashboards SLO (provisioning por código, nunca a mano)
+
+Tres artefactos versionados en [`dashboards/`](dashboards), uno por backend:
+
+| Archivo | Backend | Contenido |
+|---|---|---|
+| `grafana-slo.json` | Grafana OSS local (uid `otel-lab-slo`) | los 6 paneles leídos TODOS de Prometheus con los nombres REALES del scrape; variables `service`/`env` y data links de exemplar a Tempo (cloud) y Jaeger (local) |
+| `cloudwatch-slo.json` | CloudWatch (AWS, nativo) | máx. 3 widgets sobre los únicos contadores que existen (EMF `OtelLab`); desviaciones documentadas en el `comment` del JSON |
+| `cloud-monitoring-gcp.json` | Cloud Monitoring (GCP, nativo) | los 6 equivalentes GCP (Managed Prometheus/contadores), provisionado por su IaC |
+
+**Local**: el provider de Grafana
+(`deploy/grafana/provisioning/dashboards/dashboards.yml`) aplica el JSON en
+calor al subir el stack. Verificación en vivo:
+[`docs/evidence/05-dashboards-local.md`](docs/evidence/05-dashboards-local.md).
+
+```powershell
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.observability.yml up -d
+# 30 s despues, el tablero ya esta servido:
+curl -u admin:admin http://localhost:3000/api/dashboards/uid/otel-lab-slo
+```
+
+**AWS (mini-sesión, coste ~$0 — dashboard y alarmas no facturan cómputo)**:
+
+```bash
+make aws-dashboard   # aws cloudwatch put-dashboard --dashboard-name otel-lab-slo (idempotente)
+make aws-alarms      # 2 put-metric-alarm desde dashboards/cloudwatch-alarms.json (idempotente)
+```
+
+Las alarmas (`otel-lab-error-ratio` > 5 %; `otel-lab-db-degradation` > 5
+errores de DB/5 min) cablean acción SNS si pasas `SNS_TOPIC_ARN` (output
+`alerts_topic_arn` de `infra/aws`). Grafana **nunca** consulta CloudWatch
+(`GetMetricData` se cobra siempre): el dashboard de 6 paneles vive en Prometheus
+y el de CloudWatch es el complemento nativo de 3 widgets.
+
+### Benchmark de overhead
+
+La campaña ABBA corre contra el stack **LOCAL** (compose) con k6 en Docker y
+Prometheus local como instrumento; jaeger/grafana permanecen apagados. El coste
+por nube se lee del ingest REAL de logs de la variante B (trazas OFF, decisión
+C2), sin sesión de cómputo en ninguna nube.
+
+```powershell
+powershell -File scripts/benchmark.ps1 -Mode full -CloudLogs      # A/B (6 runs x ~7 min)
+powershell -File scripts/benchmark.ps1 -Mode attrib -CloudLogs    # atribucion (2 runs)
+powershell -File scripts/benchmark.ps1 -Mode quick                # smoke corto
+powershell -File scripts/benchmark.ps1 -Mode cloudprobe           # probes de ingesta
+python scripts/bench_report.py    # agrega -> k6/baseline.json, k6/otel.json y docs/evidence/04-overhead.md
+```
+
+- Variante A = `OTEL_ENABLED=false`; B = `true` con
+  `OTEL_TRACES_SAMPLER=parentbased_traceidratio` arg 0.25 (1.0/0.0 para la
+  atribución) y el pipeline de trazas del collector en sink `nop`
+  ([`deploy/collector/otel-collector-bench.yaml`](deploy/collector/otel-collector-bench.yaml)).
+- Artefactos crudos por run en `bench/`; el orquestador hace teardown completo al
+  terminar o fallar.
+- Limitaciones declaradas: [`docs/evidence/04-overhead.md`](docs/evidence/04-overhead.md).
+
+### Imágenes (tags fijados, sin `:latest`)
+
+| Servicio | Imagen |
+|---|---|
+| postgres | `postgres:16-alpine` |
+| otel-collector | `otel/opentelemetry-collector-contrib:0.162.0` |
+| collector ADOT (AWS) | `public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0` |
+| jaeger | `jaegertracing/all-in-one:1.76.0` |
+| prometheus | `prom/prometheus:v2.53.0` |
+| grafana | `grafana/grafana:11.1.0` |
+| k6 (benchmark) | `grafana/k6:2.0.0` |
+| service-a / service-b (cloud) | ECR `otel-lab/service-*:$(IMAGE_TAG)` · AR `otel-lab/service-*:0.1.0` |
+
+## Tabla de coste / créditos y guardarraíles por nube
+
+Presupuesto: **$100 de créditos AWS + $300 de créditos GCP** (ventana de 90
+días). Los modos nube operan **dentro de créditos con guardarraíles**, no
+"$0/mes". Detalle completo: [COST.md](COST.md).
+
+| Guardarráil | AWS | GCP |
+|---|---|---|
+| Techo de gasto | **$1/día**: budget diario creado por CLI en Fase 0 con alertas 80/100 % (evidencia `00-aws-baseline.md`); el IaC `aws_budget` (`infra/aws/budget.tf`) añade 100 % ACTUAL + 100 % FORECASTED vía SNS | Budget COP **$300** con umbrales **50/80/90/100/150 %** + alertas de cuota |
+| Gasto diario | `make cost-guard` (`ce get-cost-and-usage` + barrido de recursos) | `make cost-guard` — el mismo script cubre GCP automáticamente si `gcloud` está en el PATH (VMs RUNNING y clusters GKE); sin gcloud, avisa y sigue |
+| Horas de cómputo | `make budget-hours` / `budget-sync` → [`docs/evidence/instance-hours.csv`](docs/evidence/instance-hours.csv) (gate 150 h de task) | registro en [`docs/evidence/cluster-hours.csv`](docs/evidence/cluster-hours.csv) (fee $0.10/h desde create) |
+| Recursos prohibidos | `make tf-plan-aws` → `scripts/guard_cost.py` (lista negra: ALB, NAT, VPC endpoints, EKS, RDS, Secrets Manager…) | `guard_cost.py --provider google` (Cloud NAT, Autopilot, LB gestionado, Cloud SQL, pools no-spot…) |
+| Botón de parada | `make aws-stop` (desired_count=0) | `make gcp-stop` (pool a 0; **el fee de plano sigue**) |
+| Botón de destrucción (DoD) | `make aws-destroy` + verificación | `make gcp-destroy` + verificación |
+| Cómputo en sesión | Fargate 1 vCPU/2 GB ≈ $0.049/h | fee $0.10/h + spot e2-medium ≈ $0.012/h/nodo (autoscaling 0–3; peor caso 3 nodos ≈ $0.04/h total) |
+| Fuera de sesión | ≈ $0 | ≈ $0 (solo si el cluster está **destruido**) |
+
+**Decisión de billing (2026-10-11):** la cuenta del lab es **miembro** de una
+organización AWS; el gasto se consolida en la cuenta pagadora, que posee el
+pool real de créditos. Los budgets por-cuenta son proxy diario; el techo real
+es el pool del pagador. El teardown obligatorio aplica igualmente.
+
+## Troubleshooting
+
+| Síntoma | Causa / solución |
+|---|---|
+| `make aws-verify` no resuelve la IP de la task | Con aws-cli ≥2.32/botocore ≥1.43 los `details` de los attachments salen en camelCase y el JMESPath `.Value` falla. Resuelve `Association.PublicIp` con `ec2 describe-network-interfaces` (o boto3) y lanza `verify_correlation.py` a mano. ([docs/aws-ecs.md](docs/aws-ecs.md) §2) |
+| A8 (exemplars) FAIL en la corrida AWS | El scrape debe ir a la **app** (`:8000/metrics`, OpenMetrics), no al exporter del collector (`:8889`): los exemplars no se propagan por el collector. ([docs/aws-ecs.md](docs/aws-ecs.md) §7) |
+| `Invalid target ID format` con `ssm start-session` | Esperado: SSM **no** soporta port-forwarding a tasks Fargate. El acceso es `make aws-access-grant` (regla /32 temporal). ([docs/aws-ecs.md](docs/aws-ecs.md) §5) |
+| Pods GKE en `ContainerCreating` | Falta el add-on CSI Secret Manager en el clúster. `make gcp-start` lo crea con el cluster; sobre cluster existente, `gcloud container clusters update … --enable-secret-manager` (~40 min). |
+| Pods GKE `Pending: Insufficient cpu` | GKE ≥ 1.36 no cabe en `e2-small` (system pods ~856m). El Makefile ya fija `e2-medium`; alternativa de requests en la nota de perfil del Modo 3. |
+| service-b devuelve 500 en el cruce dual | Falta el parámetro SSM `/otel-lab/database-url/service-b` (debe apuntar a la DB `inventory`). |
+| `409` al repetir el smoke | Stock ya reservado para ese SKU — esperado. El seed se rehace reiniciando postgres (o `docker compose down -v` en local). |
+| Coste GCP inesperado con el pool a 0 | `gcp-stop` escala el nodo pero **no** detiene el fee de plano ($0.10/h). Destruye con `gcp-destroy` fuera de sesión. |
+| `helm`/`kubectl` apuntan a otro clúster | `make gcp-start` reescribe el kubeconfig; si usas otro proyecto, pasa `GCP_PROJECT_ID=…` a todos los targets. |
+| La task AWS no puede llamar al service-b de GKE | El LB debe existir ANTES de renderizar la task: orden dual = GCP primero, `make gcp-expose`, y luego `make aws-start INVENTORY_URL=http://<LB_IP>:8001`. |
+| `terraform` falla en `init` | El backend S3/GCS requiere credenciales reales; el gate de PR usa `init -backend=false` (`make tf-validate-aws` / `tf-plan-aws`). Bootstrap con state: [infra/README.md](infra/README.md). |
+| `make` no existe en Windows | Los comandos crudos equivalentes están en el propio [Makefile](Makefile) (legible); o usa `wsl`/`choco install make`. |
+
+## Mapa de documentación del repo
+
+| Documento | Qué cubre |
+|---|---|
+| [README.md](README.md) (este) | manual de ejecución de los 4 modos |
+| [COST.md](COST.md) | modelo de coste dual-cloud, listas blanca/negra, guardarraíles, procedimiento de apagado |
+| [docs/aws-ecs.md](docs/aws-ecs.md) | despliegue AWS/ECS Fargate en detalle: task def, contratos verificados, acceso, ADR de exemplars (A8) |
+| [docs/evidence/](docs/evidence) | evidencia en vivo por fase: línea base de coste (00), WI binding (01), sesiones de despliegue (02), correlación (03), overhead (04), dashboards (05) |
+| [deploy/aws/README.md](deploy/aws/README.md) | task definition, Dockerfile de postgres y políticas IAM (tokens y permisos) |
+| [infra/README.md](infra/README.md) | Terraform dual-root: bootstrap exacto por nube, backends remotos, workspaces |
+| [Makefile](Makefile) | ciclo de vida completo (targets `aws-*`, `gcp-*`, `verify-correlation*`, `tf-*`, `cost-*`, `budget-*`) |
+| [.env.example](.env.example) | plantilla de variables sin secretos |
