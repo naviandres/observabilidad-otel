@@ -8,7 +8,7 @@
     collector publica en el namespace OtelLab (lista blanca de 4 metricas,
     decision de coste PLAN 3.4 C1); no introducen metricas nuevas ni usan
     GetMetricData (R-05). Si se pasa -SnsTopicArn (output `alerts_topic_arn`
-    del IaC, feature #9), se inyecta como AlarmActions en cada alarma; sin el,
+    del IaC (fase 5)), se inyecta como AlarmActions en cada alarma; sin el,
     AlarmActions queda como venga en el JSON (vacio) y la notificacion es
     responsabilidad de quien invoque el script (p. ej. `make aws-alarms
     SNS_TOPIC_ARN=<arn>`).

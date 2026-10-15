@@ -1,4 +1,4 @@
-# CI: terraform plan de la pata AWS + gate de coste (PLAN §5.A: `terraform plan`
+# CI: terraform plan del lado AWS + gate de coste (PLAN §5.A: `terraform plan`
 # en cada PR + guard_cost.py; el APPLY solo ocurre a mano desde main — NUNCA
 # aqui). Espejo de terraform-plan-gcp.yml.
 #

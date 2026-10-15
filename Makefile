@@ -36,7 +36,7 @@ ECS_SERVICE     ?= otel-lab
 ECS_TASK_FAMILY ?= otel-lab
 TASK_ROLE       ?= otel-lab-task-ecs
 EXEC_ROLE       ?= otel-lab-exec-ecs
-# Topic SNS de alertas: `output alerts_topic_arn` del root infra/aws (feature #9).
+# Topic SNS de alertas: `output alerts_topic_arn` del root infra/aws (IaC fase 5).
 # Al pasarlo, `make aws-alarms` cablea AlarmActions de las alarmas a ese topic.
 # Vacio = las alarmas se crean/actualizan igual pero sin accion SNS. Obtenlo con:
 #   terraform -chdir=infra/aws output -raw alerts_topic_arn
@@ -78,7 +78,7 @@ AWS := aws --region $(AWS_REGION) --profile $(AWS_PROFILE)
         aws-net-create aws-net-destroy aws-push aws-start aws-stop aws-destroy \
         aws-access-grant aws-access-revoke aws-verify aws-dashboard aws-alarms \
         tf-validate-aws tf-plan-aws cost-guard budget-hours budget-sync \
-        validate-collector \
+        validate-collector report \
         verify-correlation verify-correlation-gcp verify-correlation-aws \
         verify-correlation-dual
 
@@ -337,14 +337,14 @@ aws-dashboard:
 # aws-alarms — 2 alarmas de guardraíl desde dashboards/cloudwatch-alarms.json
 # (ratio de error EMF y degradacion de DB como aproximacion disponible de la
 # p99; ver el JSON y docs/evidence/05-dashboards-local.md para las desviaciones).
-# Idempotente via put-metric-alarm. AlarmActions -> topic SNS del IaC (#9) si se
+# Idempotente via put-metric-alarm. AlarmActions -> topic SNS del IaC (fase 5) si se
 # pasa SNS_TOPIC_ARN (output `alerts_topic_arn`); sin el, la alarma se crea/actualiza
 # igual pero sin accion SNS.
 aws-alarms:
 	pwsh -NoProfile -File scripts/cloudwatch_alarms.ps1 -Region $(AWS_REGION) -Profile $(AWS_PROFILE) -SnsTopicArn "$(SNS_TOPIC_ARN)"
 
 # ===========================================================================
-# Guardarrailes de coste de la pata AWS (PLAN §3.5 / §5.A).
+# Guardarrailes de coste del lado AWS (PLAN §3.5 / §5.A).
 # ===========================================================================
 
 # tf-validate-aws — init sin backend + fmt -check + validate (lo mismo que
@@ -407,6 +407,21 @@ validate-collector:
 	docker run --rm -v "$$(pwd)/deploy/collector:/cfg" \
 	  otel/opentelemetry-collector-contrib:0.162.0 \
 	  validate --config=/cfg/otel-collector-local.yaml
+
+# report — regenera docs/report/report.pdf desde la fuente markdown
+# (docs/report/report.md) con pandoc + XeLaTeX dentro de la imagen fijada
+# `pandoc/latex:3.6.3` (tag exacto, nunca :latest). Ruta canónica única:
+# NUNCA se edita el PDF a mano; se edita el .md y se vuelve a correr:
+#   make report
+# Requisitos: Docker en marcha (la imagen se descarga sola al primer uso).
+# El PDF es un artefacto derivado: se commitea junto con su fuente.
+report:
+	docker run --rm -v "$$(pwd):/work" -w /work pandoc/latex:3.6.3 \
+	  docs/report/report.md -o docs/report/report.pdf \
+	  --pdf-engine=xelatex --toc --number-sections \
+	  -V fontsize=11pt -V geometry:margin=2.2cm -V colorlinks=true \
+	  -V linkcolor=BlueViolet -V urlcolor=NavyBlue
+	@echo ">> docs/report/report.pdf regenerado desde docs/report/report.md"
 
 # ===========================================================================
 # Verificacion de correlacion (PLAN 3.A). El framework decide su salida:

@@ -41,7 +41,7 @@ A8 **PASÓ en vivo** (corrA8, mini-sesión 2026-10-12T20:33:05Z, task
 `149e6bcef2f04912851acdd19980f6b1`, `--prometheus-url http://<IP_TASK>:8000/metrics`).
 El **hallazgo del collector sigue siendo válido** y es la razón por la que el
 puente vive en la app (ADR completo en `docs/aws-ecs.md` §7). Cadena de pruebas
-(ronda 5, `progress/impl_6_correlacion_aws.md` §Bug 5):
+(ronda 5 de la sesión de correlación del 2026-10-12):
 
 1. El **SDK manda exemplars**: verificado offline con debug exporter del collector
    (`-> Trace ID: 872a3159...` presente en el lote OTLP).

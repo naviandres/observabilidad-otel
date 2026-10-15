@@ -39,7 +39,7 @@ resource "aws_s3_bucket_versioning" "tfstate" {
 }
 
 # Copia de auditoria del YAML del Collector AWS en S3 (PLAN §5.A, paridad con
-# la copia GCS de la pata GCP). La gestiona `modules/otel-collector`: la clave
+# la copia GCS del lado GCP). La gestiona `modules/otel-collector`: la clave
 # es el SHA256 del contenido, asi que cada cambio de config deja una version
 # inmutable identificable por hash.
 module "otel_collector" {

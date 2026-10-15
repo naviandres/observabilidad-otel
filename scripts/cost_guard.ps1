@@ -18,7 +18,7 @@
     Exit 1 si hay fugas o si algun dia supera -DailyBudgetUsd; 0 si el
     laboratorio esta en reposo y dentro de presupuesto.
 
-    PLAN §3.5. Sin sesion de computo; Cost Explorer tiene lag de ~24h, por eso
+    PLAN Â§3.5. Sin sesion de computo; Cost Explorer tiene lag de ~24h, por eso
     el barrido de recursos es el que manda para el "ahora".
 .PARAMETER Region
     Region AWS (default: us-east-1).
@@ -27,7 +27,7 @@
 .PARAMETER Days
     Ultimos N dias de Cost Explorer (default: 7).
 .PARAMETER DailyBudgetUsd
-    Techo diario del budget (default: 1 USD/dia, PLAN §3.5).
+    Techo diario del budget (default: 1 USD/dia, PLAN Â§3.5).
 .EXAMPLE
     powershell -NoProfile -File scripts/cost_guard.ps1
     make cost-guard
@@ -167,7 +167,7 @@ foreach ($clusterArn in (Get-ItemsOrWarn -Label "ECS clusters" -AwsArgs @(
 # --- 3. Recursos GCP (si gcloud esta disponible) --------------------------
 # gcloud.ps1 es un wrapper PowerShell: sus avisos van al flujo de ERROR de PS
 # (no al stderr nativo), asi que EAP=Stop abortaria. Se ejecuta con EAP
-# local en Continue y se decide por $LASTEXITCODE, igual que en la pata AWS.
+# local en Continue y se decide por $LASTEXITCODE, igual que en el lado AWS.
 function Get-GcpItems {
     param([string]$Label, [string[]]$GcloudArgs)
     $prev = $ErrorActionPreference

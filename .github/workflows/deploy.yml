@@ -1,0 +1,145 @@
+# CI: despliegue IaC EXPLÍCITO por nube (PLAN §5.A "Estado de apply": apply solo
+# desde main con aprobación manual — GitHub Environments).
+#
+# Este workflow NUNCA se dispara en push/PR: el único disparador es
+# `workflow_dispatch` y cada job está colgado de un Environment con
+# protección (requeridos reviewers + branch main configurados en los ajustes
+# del repo — el gate vive en GitHub, no en este YAML). El plan-only de los PRs
+# sigue en terraform-plan.yml / terraform-plan-gcp.yml, que este archivo NO
+# toca ni reemplaza.
+#
+# Antes de aplicar, el gate `guard_cost.py` de la lista negra corre sobre el
+# plan real (esta vez CON backend/estado, no -backend=false): ningún recurso
+# vetado llega a la nube ni siquiera por vía manual. Tras el apply se verifica
+# el criterio de calidad §5.A: `plan -detailed-exitcode` == 0 (el estado del
+# repo describe la realidad).
+#
+# Secrets esperados (los mismos que los workflows de plan; nunca valores en
+# este archivo):
+#   AWS: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY  (usuario otel-lab-deploy)
+#   GCP: GCP_ADC_JSON                                (ADC con quota project)
+
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Nube a desplegar"
+        type: choice
+        required: true
+        default: aws
+        options: [aws, gcp, both]
+      tf_workspace:
+        description: "Workspace Terraform (lab|bench)"
+        type: choice
+        required: true
+        default: lab
+        options: [lab, bench]
+
+# Ningún permiso extra: los jobs piden lo suyo y nada escribe en el repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-aws:
+    if: github.event.inputs.target == 'aws' || github.event.inputs.target == 'both'
+    name: deploy-aws
+    runs-on: ubuntu-latest
+    # Gate humano: el environment exige aprobación de reviewers antes de correr.
+    environment: aws-production
+    defaults:
+      run:
+        working-directory: infra/aws
+    env:
+      TF_VAR_aws_region: us-east-1
+      TF_WORKSPACE: ${{ github.event.inputs.tf_workspace }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: credenciales AWS desde secrets
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "::error::Faltan los secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY \
+            (usuario otel-lab-deploy). Ver infra/README.md."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+
+      - name: terraform init (backend S3 real)
+        run: terraform init -input=false
+
+      - name: workspace (lab|bench)
+        run: |
+          terraform workspace select "${TF_WORKSPACE}" || terraform workspace new "${TF_WORKSPACE}"
+
+      - name: plan (con estado real)
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: guard_cost (lista negra PLAN §3.2) antes de aplicar
+        run: terraform show -json tfplan.bin | python3 ../../scripts/guard_cost.py --provider aws
+
+      - name: apply
+        run: terraform apply -input=false -auto-approve tfplan.bin
+
+      - name: criterio 5.A — plan post-apply sin cambios (exit 0)
+        run: terraform plan -input=false -detailed-exitcode
+
+  deploy-gcp:
+    if: github.event.inputs.target == 'gcp' || github.event.inputs.target == 'both'
+    name: deploy-gcp
+    runs-on: ubuntu-latest
+    environment: gcp-production
+    defaults:
+      run:
+        working-directory: infra/gcp
+    env:
+      TF_VAR_gcp_project: otel-lab-obs-2610
+      TF_VAR_gcp_region: us-central1
+      TF_WORKSPACE: ${{ github.event.inputs.tf_workspace }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ADC desde secret GCP_ADC_JSON
+        run: |
+          if [ -z "${{ secrets.GCP_ADC_JSON }}" ]; then
+            echo "::error::Falta el secret GCP_ADC_JSON (ADC con quota project \
+            otel-lab-obs-2610). Ver infra/README.md."
+            exit 1
+          fi
+          echo '${{ secrets.GCP_ADC_JSON }}' > "$RUNNER_TEMP/adc.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/adc.json" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: terraform init (backend GCS real)
+        run: terraform init -input=false
+
+      - name: workspace (lab|bench)
+        run: |
+          terraform workspace select "${TF_WORKSPACE}" || terraform workspace new "${TF_WORKSPACE}"
+
+      - name: plan (con estado real)
+        run: terraform plan -input=false -no-color -out=tfplan.bin
+
+      - name: guard_cost (lista negra PLAN §3.2) antes de aplicar
+        run: terraform show -json tfplan.bin | python3 ../../scripts/guard_cost.py --provider google
+
+      - name: apply
+        run: terraform apply -input=false -auto-approve tfplan.bin
+
+      - name: criterio 5.A — plan post-apply sin cambios (exit 0)
+        run: terraform plan -input=false -detailed-exitcode

@@ -8,3 +8,8 @@ pytest==8.4.2
 # CloudWatch reads inside the free tier). The import is lazy, so the offline
 # suite and local mode never need it installed.
 boto3==1.43.111
+
+# pypdf is used ONLY by tests/test_repo_quality.py to count pages of
+# docs/report/report.pdf (the acceptance gate ">= 5 paginas"). Pure Python,
+# offline; the report itself is generated with `make report` (Docker).
+pypdf==6.19.0

@@ -146,7 +146,8 @@ contratos quedan fijados por `tests/test_ecs_deliverable.py`:
   en vivo 2026-10-12). Con aws-cli ≥2.32/botocore ≥1.43 los `attachments[].details`
   vienen en camelCase (`name`/`value`), por lo que la lectura JMESPath `.Value`
   de `make aws-verify`/`access.ps1 Grant` puede no resolver la IP en ese entorno
-  (regresión documentada en `progress/impl_6_correlacion_aws.md`, ronda 5); el
+  (regresión documentada en la evidencia de la sesión de correlación del
+  2026-10-12); el
   camino real usado en la sesión dual fue resolver la IP con boto3 directamente.
 
 ### Contratos de la segunda sesión (ronda 2, 2026-10-12)
