@@ -161,12 +161,21 @@ verificada en vivo y documentada en [docs/aws-ecs.md](docs/aws-ecs.md) §5).
 - **Credenciales AWS**: solo en `~/.aws/` (perfil `otel-lab`). Nunca en el repo
   ni en `.env`. El perfil lo fija `AWS_PROFILE` (default del Makefile:
   `otel-lab`).
-- **SSM Parameter Store** (creados **una sola vez por el humano**, Fase 0; el
-  valor nunca se copia a este README — se referencia por nombre):
-  - `/otel-lab/postgres/password` (SecureString)
+- **SSM Parameter Store** — la task los resuelve todos vía `valueFrom` por ARN;
+  **si falta uno, la task no arranca**. Creados **una sola vez por el humano**
+  (Fase 0; el valor nunca se copia a este README — se referencia por nombre).
+  Lista canónica con el shape de cada valor:
+  [`deploy/aws/README.md`](deploy/aws/README.md) (tabla SSM). Son **10**:
+  - `/otel-lab/postgres/password` (SecureString — `POSTGRES_PASSWORD`)
   - `/otel-lab/database-url/service-a` = `postgresql://postgres:<pw>@localhost:5432/orders`
   - `/otel-lab/database-url/service-b` = `postgresql://postgres:<pw>@localhost:5432/inventory`
-  - `/otel-lab/cloudwatch-agent/config` (JSON del agente)
+  - `/otel-lab/grafana/prom-url` y `/otel-lab/grafana/prom-auth` (exporter
+    `prometheusremotewrite` del collector ADOT)
+  - `/otel-lab/grafana/tempo-endpoint` y `/otel-lab/grafana/tempo-auth`
+    (`otlphttp/tempo`)
+  - `/otel-lab/grafana/loki-endpoint` y `/otel-lab/grafana/loki-auth`
+    (`otlphttp/loki`)
+  - `/otel-lab/cloudwatch-agent/config` (JSON del agente — `CW_CONFIG_CONTENT`)
 - **Recursos permanentes creados una sola vez**: repos ECR
   `otel-lab/{service-a,service-b,otel-collector,postgres}` (tag immutable),
   roles `otel-lab-exec-ecs` (ECR pull + logs + lectura SSM) y
@@ -253,9 +262,9 @@ Logging y Cloud Monitoring (Managed Prometheus). El ciclo de vida lo gobierna el
 - `gcloud` con ADC con acceso a tu proyecto (`gcloud auth login` +
   `gcloud config set project <proyecto>`), `docker`, `kubectl`, `helm`, `make`.
 - API de GKE habilitada: `gcloud services enable container.googleapis.com`.
-- Para la verificación (`--include-gcp`): `pip install
-  google-cloud-trace google-cloud-monitoring google-cloud-logging` (o ADC con
-  `gcloud auth application-default login`).
+- Para la verificación (`--include-gcp`): ADC operativa —
+  `gcloud auth application-default login` (el script habla con las APIs vía
+  ADC + urllib; **no** requiere instalar ningún SDK de Google en Python).
 
 ### Credenciales y variables de entorno
 
@@ -329,7 +338,7 @@ el seed se rehace al reiniciar postgres). Dónde ver las 3 señales:
 |---|---|
 | Trazas | **Cloud Trace** → busca el `trace_id` que sale en el log de la orden |
 | Logs | **Cloud Logging** → logs de `service-a`, campo `jsonPayload.trace_id` |
-| Métricas | **Cloud Monitoring** → dashboard **OTel Lab — SLIs GCP (Managed Prometheus)** (6 paneles; se crea una vez con `gcloud monitoring dashboards create --config-from-file dashboards/cloud-monitoring-gcp.json`, o por su IaC) |
+| Métricas | **Cloud Monitoring** → dashboard **OTel Lab — SLIs GCP (Managed Prometheus)** (6 paneles; provisionado por su IaC — `google_monitoring_dashboard` en [`infra/gcp/dashboard.tf`](infra/gcp/dashboard.tf), que aplica el JSON tal cual). Si prefieres la CLI: `gcloud monitoring dashboards create` exige el envoltorio `dashboard:` alrededor del JSON, que el artefacto versionado NO lleva — usa la vía IaC |
 
 Evidencia en vivo: [`docs/evidence/02-validation-dashboard-gcp.md`](docs/evidence/02-validation-dashboard-gcp.md),
 [`docs/evidence/03-correlation-gcp.json`](docs/evidence/03-correlation-gcp.json),
@@ -340,8 +349,10 @@ línea base free-tier [`docs/evidence/00-free-tier-baseline-gcp.md`](docs/eviden
 ### Coste estimado
 
 Fee de plano GKE Standard **$0.10/h** (corre desde el create hasta el delete,
-aunque el pool esté a 0) + nodo spot e2-medium (~$0.04/h por nodo, autoscaler
-baja a 0 en idle). Presupuesto GCP: **$300 de créditos** con ventana de 90 días
+aunque el pool esté a 0) + nodo spot e2-medium (~$0.012/h por nodo medido en
+sesión; autoscaler baja a 0 en idle — el `~$0.04/h` del comentario del Makefile
+es el peor caso de 3 nodos en total). Presupuesto GCP: **$300 de créditos** con
+ventana de 90 días
 y alertas de budget al 50/80/90/100/150 %. Modelo completo en
 [COST.md](COST.md) §1; horas reales de sesión en
 [`docs/evidence/cluster-hours.csv`](docs/evidence/cluster-hours.csv).
@@ -349,8 +360,11 @@ y alertas de budget al 50/80/90/100/150 %. Modelo completo en
 > **Nota de perfil (GKE ≥ 1.36):** el pool es `e2-medium` (no `e2-small`): los
 > system pods consumen ~856m y el add-on CSI pide su propio espacio — con
 > `e2-small` los pods quedan `Pending` con `Insufficient cpu` (observado en
-> vivo). Para apurar un perfil menor, baja los requests a 20m sustituyendo
-> `make deploy-gcp` por su `helm` equivalente:
+> vivo). El chart **ya fija requests de 20m/pod por defecto** en los 5
+> componentes (limits de 1 CPU intactos, ver
+> [`helm/otel-lab/values.yaml`](helm/otel-lab/values.yaml)) — no hay que bajar
+> nada; el `helm upgrade --install` con `--set …requests.cpu=20m` solo sirve
+> como ejemplo si se quiere forzar el override desde otra base de values:
 >
 > ```powershell
 > helm upgrade --install otel-lab helm/otel-lab --namespace otel-lab `
@@ -381,8 +395,8 @@ Cloud Logging). Orden ejecutado en vivo el 2026-10-12 y verificado:
 ### Prerrequisitos / toolchain
 
 La **unión** de los modos 2 y 3: `aws` CLI + perfil, `gcloud` + ADC, `docker`,
-`kubectl`, `helm`, `make`, `pwsh`, y `pip install boto3 google-cloud-trace
-google-cloud-monitoring google-cloud-logging`.
+`kubectl`, `helm`, `make`, `pwsh`, y `pip install boto3` (para `--include-aws`;
+`--include-gcp` solo necesita la ADC de `gcloud`).
 
 ### Credenciales y variables de entorno
 
@@ -426,7 +440,9 @@ make aws-start INVENTORY_URL=http://<LB_IP>:8001
    make aws-start INVENTORY_URL=http://<LB_IP>:8001   # service-a(ECS) -> service-b(GKE)
    python scripts/verify_correlation.py --endpoint http://<IP_TASK>:8000 `
      --include-aws --include-gcp --prometheus-url http://<IP_TASK>:8000/metrics
-   # (equivale a: make verify-correlation-dual con VERIFY_ENDPOINT y PROM_URL apuntando a la task)
+   # (el target `make verify-correlation-dual` activa ambas banderas pero NO pasa
+   #  --prometheus-url; para cerrar A8 en la corrida dual lanza el script a mano
+   #  como arriba, con --prometheus-url apuntando al scrape app-level de la task)
    ```
 
 4. **Corrida GCP dedicada** (cierra A10-A12 contra el cluster interno):
@@ -546,13 +562,13 @@ días). Los modos nube operan **dentro de créditos con guardarraíles**, no
 
 | Guardarráil | AWS | GCP |
 |---|---|---|
-| Techo de gasto | `aws_budget`: umbral **$1/día**, alertas 80/100 % vía SNS | Budget COP **$300** con umbrales **50/80/90/100/150 %** + alertas de cuota |
-| Gasto diario | `make cost-guard` (`ce get-cost-and-usage`) | `cost_guard.ps1 --provider google` (fee + spot + ingest) |
+| Techo de gasto | **$1/día**: budget diario creado por CLI en Fase 0 con alertas 80/100 % (evidencia `00-aws-baseline.md`); el IaC `aws_budget` (`infra/aws/budget.tf`) añade 100 % ACTUAL + 100 % FORECASTED vía SNS | Budget COP **$300** con umbrales **50/80/90/100/150 %** + alertas de cuota |
+| Gasto diario | `make cost-guard` (`ce get-cost-and-usage` + barrido de recursos) | `make cost-guard` — el mismo script cubre GCP automáticamente si `gcloud` está en el PATH (VMs RUNNING y clusters GKE); sin gcloud, avisa y sigue |
 | Horas de cómputo | `make budget-hours` / `budget-sync` → [`docs/evidence/instance-hours.csv`](docs/evidence/instance-hours.csv) (gate 150 h de task) | registro en [`docs/evidence/cluster-hours.csv`](docs/evidence/cluster-hours.csv) (fee $0.10/h desde create) |
 | Recursos prohibidos | `make tf-plan-aws` → `scripts/guard_cost.py` (lista negra: ALB, NAT, VPC endpoints, EKS, RDS, Secrets Manager…) | `guard_cost.py --provider google` (Cloud NAT, Autopilot, LB gestionado, Cloud SQL, pools no-spot…) |
 | Botón de parada | `make aws-stop` (desired_count=0) | `make gcp-stop` (pool a 0; **el fee de plano sigue**) |
 | Botón de destrucción (DoD) | `make aws-destroy` + verificación | `make gcp-destroy` + verificación |
-| Cómputo en sesión | Fargate 1 vCPU/2 GB ≈ $0.049/h | fee $0.10/h + spot e2-medium ≈ $0.04/h/nodo (autoscaling 0–3) |
+| Cómputo en sesión | Fargate 1 vCPU/2 GB ≈ $0.049/h | fee $0.10/h + spot e2-medium ≈ $0.012/h/nodo (autoscaling 0–3; peor caso 3 nodos ≈ $0.04/h total) |
 | Fuera de sesión | ≈ $0 | ≈ $0 (solo si el cluster está **destruido**) |
 
 **Decisión de billing (2026-10-11):** la cuenta del lab es **miembro** de una
